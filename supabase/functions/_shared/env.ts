@@ -40,5 +40,12 @@ export const MEMORY_ITEMS_TABLE = getOptionalEnv('MEMORY_ITEMS_TABLE') || 'memor
 export const CONVERSATION_SUMMARIES_TABLE = getOptionalEnv('CONVERSATION_SUMMARIES_TABLE') || 'conversation_summaries';
 export const TOOL_TRACES_TABLE = getOptionalEnv('TOOL_TRACES_TABLE') || 'tool_traces';
 
+export const ONBOARDING_EVENTS_TABLE = getOptionalEnv('ONBOARDING_EVENTS_TABLE') || 'onboarding_events';
+export const PROACTIVE_MESSAGES_TABLE = getOptionalEnv('PROACTIVE_MESSAGES_TABLE') || 'proactive_messages';
+export const EXPERIMENT_ASSIGNMENTS_TABLE = getOptionalEnv('EXPERIMENT_ASSIGNMENTS_TABLE') || 'experiment_assignments';
+
+export const SEARCH_DOCUMENTS_TABLE = getOptionalEnv('SEARCH_DOCUMENTS_TABLE') || 'search_documents';
+export const SEARCH_EMBEDDINGS_TABLE = getOptionalEnv('SEARCH_EMBEDDINGS_TABLE') || 'search_embeddings';
+
 export const MEMORY_V2_ENABLED = (getOptionalEnv('MEMORY_V2_ENABLED') || 'true') === 'true';
 export const EXTRACTOR_VERSION = getOptionalEnv('MEMORY_EXTRACTOR_VERSION') || 'v2.0';

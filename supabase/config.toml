@@ -20,3 +20,9 @@ verify_jwt = false
 
 [functions.nest-onboard]
 verify_jwt = false
+
+[functions.proactive-orchestrator]
+verify_jwt = false
+
+[functions.manage-google-accounts]
+verify_jwt = false

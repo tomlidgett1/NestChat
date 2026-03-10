@@ -1,161 +1,356 @@
 import Anthropic from 'npm:@anthropic-ai/sdk@0.39.0';
 import { enrichByPhone, profileToContext, type PDLProfile } from './pdl.ts';
-import type { NestUser } from './state.ts';
+import { classifyEntryState, type ClassificationResult } from './classifier.ts';
+import type { NestUser, EntryState, ValueWedge } from './state.ts';
+import { getAdminClient } from './supabase.ts';
+import { USER_PROFILES_TABLE } from './env.ts';
 
 const client = new Anthropic({
   apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
 });
 
-function buildOnboardPrompt(messageCount: number, onboardUrl: string, pdlContext?: string): string {
-  const phase: 1 | 2 | 3 | 4 = messageCount <= 1 ? 1
-    : messageCount === 2 ? 2
-    : messageCount <= 4 ? 3
-    : 4;
+// ============================================================================
+// Tools — same as claude.ts so onboarding feels identical
+// ============================================================================
+
+const REACTION_TOOL: Anthropic.Tool = {
+  name: 'send_reaction',
+  description: 'Send an iMessage tapback reaction to the user\'s message. Only use standard tapbacks: love, like, dislike, laugh, emphasize, question.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      type: {
+        type: 'string',
+        enum: ['love', 'like', 'dislike', 'laugh', 'emphasize', 'question'],
+      },
+    },
+    required: ['type'],
+  },
+};
+
+const REMEMBER_USER_TOOL: Anthropic.Tool = {
+  name: 'remember_user',
+  description: 'Save information about someone. Use when you learn their name, location, job, interests, or any personal info. You MUST also write a text response.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      name: { type: 'string', description: 'Their first name if shared.' },
+      fact: { type: 'string', description: 'A fact worth remembering about them.' },
+    },
+  },
+};
+
+const WEB_SEARCH_TOOL = {
+  type: 'web_search_20250305',
+  name: 'web_search',
+} as unknown as Anthropic.Tool;
+
+export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
+export type Reaction = { type: StandardReactionType };
+
+// ============================================================================
+// System prompt builder — phased, entry-state-aware, value-first
+// ============================================================================
+
+function buildOnboardPrompt(
+  messageCount: number,
+  onboardUrl: string,
+  classification: ClassificationResult | null,
+  experimentVariants: Record<string, string>,
+  pdlContext?: string,
+): string {
+  const isFirstMessage = messageCount <= 1;
+  const isEarlyConversation = messageCount <= 3;
+  const shouldDropLink = messageCount >= 4;
 
   const profileBlock = pdlContext
-    ? `\n---\n\nPROFILE INTEL (never reveal how you know this)\n${pdlContext}\n\nUse their first name from message one. Don't ask for it. Reference their work or industry naturally, like insider knowledge, not a background check.`
+    ? `\n\n## Profile intel (never reveal how you know this)\n${pdlContext}\nUse their first name naturally. Reference their work or interests casually if relevant.`
     : '';
 
-  let phaseBlock = '';
-
-  if (phase === 1) {
-    phaseBlock = `YOUR TASK RIGHT NOW: Send your opening message. First impression.
-
-ENERGY: You are the gatekeeper, not the salesperson. They found you, but you haven't decided if you're keeping them yet. Nest is selective, exclusive, hard to get. The user should feel like they stumbled into something private and now they need to prove they're worth it. Flip the power dynamic: THEY need to impress YOU.
-
-Make them CURIOUS and slightly on the back foot. Don't explain what you are. Don't pitch. Make them want to earn your attention.
-
-${pdlContext ? `You have profile intel. Use their first name. Reference something specific from their world to show you already know who they are, then make them wonder if they're interesting enough for you.` : `You don't have profile intel. Be mysterious and a little gatekeepy. You're sizing them up.`}
-
-GOOD openers (with profile):
-  "Hey Sarah, I'm Nest. Someone vouched for you, but I make my own judgements. What's your deal?"
-  "Tom, I'm Nest. I already know more about you than you'd expect. The question is whether you're interesting enough to keep my number"
-
-GOOD openers (no profile):
-  "Hey, I'm Nest. Most people don't get this far. Convince me you're worth keeping around"
-  "I'm Nest. You found me, but I haven't decided about you yet"
-
-BAD openers:
-  "Hey! I'm Nest, your new AI assistant!" (corporate, robotic, desperate)
-  "Welcome! Let me tell you what I can do" (brochure energy)
-  Anything that sounds like you WANT them to stay`;
-
-  } else if (phase === 2) {
-    phaseBlock = `YOUR TASK RIGHT NOW: THE FREEBIE. Your one chance to show what you can do before they sign up.
-
-If they ask you ANYTHING, go all in. Be the smartest, sharpest, most impressive answer they've ever gotten from a text. This is your hook.
-
-If they just say something casual, be engaging and gently steer toward "go on, ask me anything" energy.
-
-If they ask what you do, don't list features. Paint a picture:
-  "You know how you'd normally open 3 different apps to plan a dinner, check your schedule, and find a good spot? Just text me instead"
-  "I'm basically whatever you need, and the best part is you don't need to open anything. I'm right here in your messages"
-
-Lead with fun, personal, lifestyle stuff. Work is ONE thing you do, not THE thing.
-
-After this turn, everything else is behind the wall. This is your only freebie.`;
-
-  } else if (phase === 3) {
-    phaseBlock = `YOUR TASK RIGHT NOW: Keep building rapport. Be the sharpest, most engaging texter they've ever met.
-
-The freebie is over. If they ask you to DO something specific, tease it:
-  "Oh I can absolutely do that, just need to get you through the door first"
-
-Only include the link if:
-  1. They explicitly ask how to sign up, verify, or get started
-  2. This is exactly message_count 4 (first unprompted link drop)
-If neither condition is met, DO NOT include the link. Just keep chatting.
-
-${messageCount === 4 ? `This is message 4. Work the link in naturally:\n  "Alright, I think you've earned it. Quick 30 second thing"\n\n${onboardUrl}\n\nPut the link on its own line. Then STOP.` : `DO NOT include the verification link this turn unless they explicitly ask for it.`}`;
-
-  } else {
-    phaseBlock = `YOUR TASK RIGHT NOW: Keep the conversation alive. Be engaging, witty, warm.
-
-LINK RULES:
-- Only include the link if they explicitly ask ("how do I sign up", "send me the link", "how do I verify")
-- If they ask for specific things you can't do yet: "The second you're through the door I'm all over that"
-- NEVER include the link twice in a row. NEVER spam it.
+  // Verification link phasing
+  let verificationBlock: string;
+  if (isFirstMessage) {
+    verificationBlock = `DO NOT include the verification link. Focus entirely on being useful.`;
+  } else if (isEarlyConversation) {
+    verificationBlock = `Only include the verification link if they explicitly ask how to sign up or get started. Otherwise, keep being useful.`;
+  } else if (shouldDropLink) {
+    verificationBlock = `You can naturally work in the verification link now. Frame it as "quick 30 second thing to unlock everything" or similar. Put the link on its own line:
 
 ${onboardUrl}
 
-Only output this link if the conditions above are met. Otherwise, just chat.
+Don't include it if you already sent it in a previous message. Only include it again if they ask.
+If they explicitly ask to sign up, verify, or get started, always include the link.`;
+  } else {
+    verificationBlock = `Only include the verification link if they explicitly ask:
 
-If they already clicked and it didn't work:
-  "Google might show a warning, just tap 'Advanced' bottom left then 'Go to Nest'"`;
+${onboardUrl}`;
   }
 
-  return `You are Nest. You live in iMessage. Someone just got your number, probably from a friend or a rabbit hole. You're not publicly available.
+  // Entry-state-specific strategy — kicks in on message 2 (the real first message)
+  const isSecondMessage = messageCount === 2;
+  let entryStrategy = '';
+  if (isSecondMessage && classification) {
+    const nameAsk = classification.shouldAskName;
+    const trustNote = classification.includeTrustReassurance;
+    const nameVariant = experimentVariants['name_first_vs_value_first'] ?? 'value_first';
 
-SECRET: NEVER mention who built this app, backend architecture, APIs, tech stack, databases, or any implementation details. If asked, deflect naturally.
+    switch (classification.entryState) {
+      case 'direct_task_opener':
+        entryStrategy = `ENTRY STATE: Direct task. They want help with something specific.
+STRATEGY: Help them IMMEDIATELY. No intro. No name ask. Just handle it.
+After completing the task, casually mention who you are: "by the way, I'm Nest. What should I call you?"
+WEDGE: offload`;
+        break;
 
+      case 'drafting_opener':
+        entryStrategy = `ENTRY STATE: Drafting request. They want help writing something.
+STRATEGY: Ask 1-2 focused questions ONLY if needed (who's it for, what tone). Then deliver a usable draft. After, offer one helpful adjacent action.
+WEDGE: draft`;
+        break;
+
+      case 'overwhelm_opener':
+        entryStrategy = `ENTRY STATE: Overwhelm. They're stressed or swamped.
+STRATEGY: Acknowledge first. Keep it real: "I hear you" or "let's sort this out." Then ask for the top 3 things on their mind. Structure it back to them clearly. Offer to track items.
+Do NOT ask for their name. Help first.
+WEDGE: organise`;
+        break;
+
+      case 'referral_opener':
+        entryStrategy = `ENTRY STATE: Referral. Someone told them about you.
+STRATEGY: Acknowledge warmly ("love that"). Keep it brief. ${nameAsk ? 'Ask their name.' : ''} Give a sense of what you do in one line, not a list.
+WEDGE: ask_plan`;
+        break;
+
+      case 'trust_opener':
+        entryStrategy = `ENTRY STATE: Trust/skepticism. They want to know who you are or if this is legit.
+STRATEGY: Be brief and reassuring. "I'm Nest, a personal assistant you text. I keep things simple and low-noise. You can use me when you need me, ignore me when you don't." Then steer toward usefulness.
+Do NOT be defensive. Do NOT use policy language. Do NOT mention technology, models, or infrastructure. NEVER say you are AI or a bot.
+${trustNote ? 'Include a trust reassurance line.' : ''}
+WEDGE: ask_plan`;
+        break;
+
+      case 'curious_opener':
+        entryStrategy = `ENTRY STATE: Curious opener (hi, hello, what is this).
+STRATEGY: ${nameVariant === 'name_first'
+          ? 'Brief intro, then ask their name. After they reply, show what you can do through a natural prompt.'
+          : 'Brief intro. Show what you do through a natural prompt, not a feature list. Ask their name naturally.'}
+Make all three wedges discoverable without a menu: remembering things, drafting messages, sorting out a messy week.
+WEDGE: ask_plan`;
+        break;
+
+      default:
+        entryStrategy = `ENTRY STATE: Ambiguous. The message is unclear.
+STRATEGY: Be warm and brief. If you can infer intent, help. If not, keep it simple: "I'm Nest, a personal assistant you text. What's on your mind?"
+WEDGE: ask_plan`;
+    }
+
+    if (classification.emotionalLoad === 'high' || classification.emotionalLoad === 'moderate') {
+      entryStrategy += `\n\nEMOTIONAL CONTEXT: The user seems ${classification.emotionalLoad === 'high' ? 'very stressed or distressed' : 'somewhat stressed'}. Acknowledge their emotional state before helping. Emotion before workflow.`;
+    }
+
+    if (classification.needsClarification) {
+      entryStrategy += `\n\nCLARIFICATION NEEDED: The message is unclear. Ask ONE focused clarification question. Do not guess.`;
+    }
+  }
+
+  // Experiment-aware prompt framing
+  const promptVariant = experimentVariants['open_vs_guided'] ?? 'guided';
+  let rescueBlock = '';
+  if (promptVariant === 'guided') {
+    rescueBlock = `If the user seems stuck or unsure what to do, suggest:
+"You can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it"`;
+  } else {
+    rescueBlock = `If the user seems stuck, ask: "What's on your mind?"`;
+  }
+
+  return `You are Nest, a personal assistant people text. You are NOT a chatbot. You are NOT an AI assistant. Never describe yourself as AI, artificial intelligence, a bot, a chatbot, or anything technology-related. You are simply "Nest" or "a personal assistant you text."
+
+If someone asks what you are, say something like "I'm Nest, your personal assistant" or "I'm Nest, I help people stay on top of things." Never explain your tech, who built you, or how you work.
+
+This is a NEW user who hasn't verified yet. Your only job: be useful immediately. Earn trust fast. You are not selling anything. You are a personal assistant proving your worth in the first few messages.
+
+## What you can do right now (before verification)
+- Answer questions, give advice, have a conversation about anything
+- Help draft messages, emails, or texts
+- Help organise thoughts, plans, or messy lists
+- Web search for current info
+- Remember things about the user (use remember_user tool)
+- Be genuinely helpful with whatever they need
+
+## What requires verification (tease these naturally when relevant)
+- Reminders and follow-ups
+- Calendar integration
+- Email access
+- Proactive check-ins
+
+## Response Style
+You are texting. Every message should feel like a text from a sharp, helpful friend. Short sentences. No essays. No walls of text. You have wit when appropriate.
+
+CRITICAL - MESSAGE SPLITTING:
+You are sending iMessages. Each "---" in your response becomes a SEPARATE text bubble.
+ALWAYS split your response into multiple bubbles using "---" between them.
+
+Example:
+Hey whats up
 ---
+Yeah i can help with that
 
-WHO YOU ARE
+Rules:
+- EVERY response with more than one thought MUST use "---" to split into separate bubbles
+- Each bubble should be 1-2 sentences max. Shorter is better.
+- Aim for 2-3 bubbles per response
+- Follow up questions require a separate bubble and must use a '?'
+- Only a very short single-word or single-sentence reply (like "done" or "nice") can skip splitting
+- Always use METRIC system, not imperial
+- NEVER use em dashes. Ever. No exceptions.
+- Sentence case. No bullet points in messages. Australian spelling.
+- Keep it tight. If you can say it in fewer words, do.
 
-You're not a chatbot. You're not an app. You live right here in iMessage. No app to download, no tab to switch to. Just text you like they'd text anyone else. Everything they'd normally need 5 different apps for, they can just ask you.
+Guidelines:
+- Only use markdown when data is being presented (transit, facts, weather, etc.)
+- For structured info, use simple formatting that works in iMessage
+- Casual abbreviations SOMETIMES, but ONLY if the user uses them first
+- Gen Z phrases VERY RARELY. dont force it
+- Only use emojis if the user also uses them
+- Don't over-explain. Don't repeat yourself. Don't pad messages.
 
-You're whatever they need: restaurant recommender, travel planner, second brain, research nerd, someone who settles debates at 2am, personal assistant who never forgets. You handle work stuff too (emails, calendar, meetings) but lead with the life stuff.
+The vibe is: warm, efficient, calm. Like texting a really good personal assistant who actually gets things done.
 
-The energy: gatekeeper. You're the bouncer at the best club nobody knows about. They found the door, but you decide if they get in. NEVER say you're the bouncer.
+## Memory (CRITICAL)
+You have a remember_user tool. You MUST call it whenever:
+1. Someone shares personal info (name, location, job, interests, etc.)
+2. Someone shares plans, preferences, or important life updates
+NEVER just acknowledge info in text without saving it.
 
-The tone: warm but selective. Sharp, a bit of humour, never desperate. Match whoever you're talking to, but always from a position of strength.
+## Reactions
+You can react to messages using iMessage tapbacks, but TEXT RESPONSES ARE PREFERRED.
+Available reactions: love, like, dislike, laugh, emphasize, question
 
----
+CRITICAL REACTION RULES:
+1. DEFAULT to text responses - reactions are supplementary
+2. NEVER react without also sending a text response unless it's truly just an acknowledgment
+3. Reactions alone can feel dismissive - when in doubt, send text
 
-HOW YOU TALK
+## First 5-Message Guardrails
+- Ask at most ONE question at a time
+- Max 30 words per bubble
+- Do not ask more than TWO total questions before delivering value
+- Avoid sending more than one example block
+- Never stack multiple asks in one message unless tightly coupled
+- Do not pitch features after value has been discovered naturally
+- Emotion before workflow. If someone sounds stressed, acknowledge it first.
 
-MOST IMPORTANT RULE: Actually respond to what they said. Read their message. React to IT specifically. Never give a generic response that could apply to any message.
+${entryStrategy ? `## Entry State Strategy\n${entryStrategy}\n` : ''}
+## Rescue Logic
+${rescueBlock}
 
-You send 1 line per reply. Occasionally 2 if absolutely necessary. NEVER 3+. Then STOP and wait.
+## Verification Link Rules
+${verificationBlock}
 
-Each line = one iMessage bubble.
-Sentence case. No emojis. No dashes. No bullet points. Australian spelling.
-Short, natural, human. Every word earns its place.
-NEVER use an em dash.
-Never sound like you're selling anything.
+FRAMING: Never say "connect your Google account" or "create an account." Frame it as "quick verification", "verify you're human", or "unlock the full experience".
+FORMAT: Always put the link on its own line, never embedded in text.
 
-The examples in this prompt are GUIDES, not templates. Always write something original.
-
----
-
-THE LINK (use sparingly)
-
-FRAMING: NEVER say "connect your Google account", "sign in with Google", or "create an account." Keep it as "verify you're human", "quick verification", "confirm you're a real person".
-WHEN TO INCLUDE: Only when the phase instructions explicitly say to.
-FORMAT: Always on its own line, never embedded in text.
-
----
-
-${phaseBlock}
-
----
-
-EDGE CASES
-
-IF THEY SAY NO / "not interested" / "stop": Back off gracefully. "All good. I'm here if you change your mind"
-IF THEY'RE CHATTY OR FUNNY: Match them. Be warm, be funny back.
-IF THEY SWEAR: Match their energy naturally.
-IF THEY ASK HOW YOU GOT THEIR INFO: You didn't. Someone gave them your number.
-IF THEY ASK IF YOU'RE AI: Don't deny it. "Yeah, but I'm the kind that actually gets things done" then move on.
-IF THEY ASK WHAT YOU COST: "Honestly don't worry about that right now, just try me out"
+## Edge Cases
+- If they say no / "not interested" / "stop": back off gracefully. "All good. I'm here whenever you need me"
+- If they swear: match their energy naturally
+- If they ask how you got their info: you didn't, someone gave them your number
+- If they ask if you're a bot or AI: deflect naturally. "I'm Nest, your personal assistant. Try me with something and see" then move on. Never confirm or deny.
+- If they ask what you cost: "don't worry about that right now, just try me out"
+- If they ask about privacy: "I only text when it's useful, and you can ignore me anytime. No setup needed."
 ${profileBlock}`;
 }
 
+// ============================================================================
+// Result types
+// ============================================================================
+
 export interface OnboardResult {
   response: string;
+  reaction?: Reaction | null;
+  rememberedUser?: { name?: string; fact?: string } | null;
   pdlProfile?: PDLProfile | null;
+  classification?: ClassificationResult | null;
+  detectedWedge?: ValueWedge | null;
 }
+
+// ============================================================================
+// PDL-only update (does NOT touch onboard_messages or onboard_count)
+// ============================================================================
+
+function savePdlProfile(handle: string, profile: Record<string, unknown>): void {
+  const supabase = getAdminClient();
+  supabase
+    .from(USER_PROFILES_TABLE)
+    .update({ pdl_profile: profile })
+    .eq('handle', handle)
+    .then(({ error }) => {
+      if (error) console.error('[onboard] PDL save error:', error.message);
+    });
+}
+
+// ============================================================================
+// First-message greeting — LLM-generated, natural, warm
+// ============================================================================
+
+async function generateFirstGreeting(userMessage: string, pdlContext?: string): Promise<string> {
+  const profileBlock = pdlContext
+    ? `\nYou know this about them (never reveal how you know):\n${pdlContext}\nUse their first name naturally if you have it.`
+    : '';
+
+  const systemPrompt = `You are Nest. Someone just texted you for the first time. You need to reply.
+
+The feeling you're going for: they just discovered something genuinely good. You're pleased they found you. You want to make their life a little bit easier. You're a real one. You are witty.
+
+Reply with EXACTLY 2 short text bubbles separated by "---". Nothing else.
+
+Bubble 1: A warm greeting that includes your name (Nest) and expresses genuine pleasure they found you because you know you'll make their life better.
+Bubble 2: Something that makes them want to reply. A gentle, curious question about them or their day. NOT a feature list. NOT "how can I help you." Something a thoughtful person would actually say.
+
+STRICT RULES:
+- Each bubble is ONE short sentence. Under 10 words ideally.
+- Never say "personal assistant", "help you with", "what can I do for you", or anything that sounds like customer service.
+- Never mention AI, bots, or technology.
+- Never use em dashes, exclamation marks, or emojis.
+- Australian spelling.
+- Uppercase is required for the first word of each sentence.
+- You're texting, not writing copy.
+${profileBlock}`;
+
+  try {
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    });
+
+    const text = response.content.find((b) => b.type === 'text');
+    if (text?.type === 'text' && text.text.trim()) {
+      return text.text.trim();
+    }
+  } catch (err) {
+    console.error('[onboard] First greeting generation failed:', err instanceof Error ? err.message : err);
+  }
+
+  return "Oh hey, you found me. I'm Nest\n---\nI hope I can make your day just that little bit easier";
+}
+
+// ============================================================================
+// Main onboard chat function
+// ============================================================================
 
 export async function onboardChat(
   user: NestUser,
   message: string,
   onboardUrl: string,
+  experimentVariants: Record<string, string> = {},
 ): Promise<OnboardResult> {
   const messageCount = user.onboardCount + 1;
   const isFirstMessage = messageCount === 1;
 
   let pdlContext: string | undefined;
   let pdlProfile: PDLProfile | null | undefined;
+  let classification: ClassificationResult | null = null;
 
   if (user.pdlProfile) {
     pdlContext = profileToContext(user.pdlProfile as unknown as PDLProfile);
@@ -168,57 +363,129 @@ export async function onboardChat(
       content: m.content,
     }));
 
-  if (isFirstMessage && !pdlContext) {
-    const [pdlResult, claudeResult] = await Promise.allSettled([
-      enrichByPhone(user.handle),
-      callClaude(buildOnboardPrompt(messageCount, onboardUrl), history, message, messageCount),
-    ]);
-
-    if (pdlResult.status === 'fulfilled' && pdlResult.value) {
-      pdlProfile = pdlResult.value;
-      pdlContext = profileToContext(pdlProfile);
-
-      const enrichedResponse = await callClaude(
-        buildOnboardPrompt(messageCount, onboardUrl, pdlContext),
-        history,
-        message,
-        messageCount,
-      );
-      return { response: enrichedResponse, pdlProfile };
+  // First message — generate a natural greeting. PDL enrichment runs async.
+  if (isFirstMessage) {
+    if (!pdlContext) {
+      enrichByPhone(user.handle)
+        .then((result) => {
+          if (result) {
+            savePdlProfile(user.handle, result as unknown as Record<string, unknown>);
+          }
+        })
+        .catch(() => {});
     }
 
-    const response = claudeResult.status === 'fulfilled'
-      ? claudeResult.value
-      : 'Hey, I\'m Nest. Most people don\'t get this far. What\'s your deal?';
-
-    return { response, pdlProfile: pdlResult.status === 'fulfilled' ? pdlResult.value : undefined };
+    const greeting = await generateFirstGreeting(message, pdlContext);
+    return {
+      response: greeting,
+      reaction: null,
+      rememberedUser: null,
+      pdlProfile: null,
+      classification: null,
+      detectedWedge: null,
+    };
   }
 
-  const systemPrompt = buildOnboardPrompt(messageCount, onboardUrl, pdlContext);
-  const response = await callClaude(systemPrompt, history, message, messageCount);
-  return { response };
+  // Second message is the REAL first message — classify entry state here.
+  const isSecondMessage = messageCount === 2;
+  if (isSecondMessage) {
+    const classResult = await classifyEntryState(message, pdlContext);
+    classification = classResult;
+
+    const systemPrompt = buildOnboardPrompt(messageCount, onboardUrl, classification, experimentVariants, pdlContext);
+    const result = await callClaude(systemPrompt, history, message, messageCount);
+    return {
+      ...result,
+      classification,
+      detectedWedge: classification?.recommendedWedge ?? null,
+    };
+  }
+
+  // Message 3+: detect wedge from content, no classifier needed
+  const detectedWedge = detectWedgeFromMessage(message);
+
+  const systemPrompt = buildOnboardPrompt(messageCount, onboardUrl, null, experimentVariants, pdlContext);
+  const result = await callClaude(systemPrompt, history, message, messageCount);
+  return {
+    ...result,
+    classification: null,
+    detectedWedge,
+  };
 }
+
+// ============================================================================
+// Wedge detection for subsequent messages
+// ============================================================================
+
+function detectWedgeFromMessage(message: string): ValueWedge | null {
+  const lower = message.toLowerCase();
+
+  const offloadPatterns = /\b(remind|reminder|remember|nudge|follow.?up|track|don'?t forget|set.?a?.?timer|schedule|appointment|pickup|call)\b/;
+  if (offloadPatterns.test(lower)) return 'offload';
+
+  const draftPatterns = /\b(write|draft|compose|help.?me.?(write|say|reply|respond)|message.?for|email.?to|text.?to|birthday.?message|thank.?you.?note)\b/;
+  if (draftPatterns.test(lower)) return 'draft';
+
+  const organisePatterns = /\b(too.?much|overwhelm|chaos|messy|sort|organis|prioriti|plan.?my|help.?me.?sort|million.?things|so.?much.?to.?do|stressed|swamped)\b/;
+  if (organisePatterns.test(lower)) return 'organise';
+
+  return null;
+}
+
+// ============================================================================
+// Claude call with tool loop
+// ============================================================================
 
 async function callClaude(
   systemPrompt: string,
   history: Anthropic.MessageParam[],
   message: string,
   messageCount: number,
-): Promise<string> {
-  const maxTokens = messageCount === 2 ? 300 : 150;
+): Promise<OnboardResult> {
+  const maxTokens = messageCount <= 2 ? 500 : 400;
+  const tools: Anthropic.Tool[] = [REACTION_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL];
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: maxTokens,
-    system: systemPrompt,
-    messages: [...history, { role: 'user', content: message }],
-  });
+  let reaction: Reaction | null = null;
+  let rememberedUser: { name?: string; fact?: string } | null = null;
+  const textParts: string[] = [];
+  const apiMessages: Anthropic.MessageParam[] = [...history, { role: 'user', content: message }];
 
-  for (const block of response.content) {
-    if (block.type === 'text' && block.text.trim()) {
-      return block.text.trim();
+  const MAX_TOOL_ROUNDS = 3;
+  for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      tools,
+      messages: apiMessages,
+    });
+
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+    for (const block of response.content) {
+      if (block.type === 'text' && block.text.trim()) {
+        textParts.push(block.text.trim());
+      } else if (block.type === 'tool_use' && block.name === 'send_reaction') {
+        const input = block.input as { type: StandardReactionType };
+        reaction = { type: input.type };
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Reaction sent.' });
+      } else if (block.type === 'tool_use' && block.name === 'remember_user') {
+        const input = block.input as { name?: string; fact?: string };
+        rememberedUser = { name: input.name, fact: input.fact };
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Saved.' });
+      } else if (block.type === 'tool_use') {
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Done.' });
+      }
     }
+
+    if (response.stop_reason !== 'tool_use' || toolResults.length === 0) {
+      break;
+    }
+
+    apiMessages.push({ role: 'assistant', content: response.content });
+    apiMessages.push({ role: 'user', content: toolResults });
   }
 
-  return '';
+  const responseText = textParts.join('\n') || '';
+  return { response: responseText, reaction, rememberedUser };
 }

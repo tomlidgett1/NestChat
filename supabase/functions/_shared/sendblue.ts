@@ -327,7 +327,7 @@ export async function sendMessage(
 }
 
 export async function markAsRead(conversation: ConversationTarget): Promise<void> {
-  if (conversation.service !== 'iMessage' || conversation.isGroupChat) return;
+  if (conversation.service === 'SMS' || conversation.isGroupChat) return;
 
   await sendRequest('/api/mark-read', {
     method: 'POST',
@@ -340,7 +340,7 @@ export async function markAsRead(conversation: ConversationTarget): Promise<void
 }
 
 export async function startTyping(conversation: ConversationTarget): Promise<void> {
-  if (conversation.service !== 'iMessage' || conversation.isGroupChat) return;
+  if (conversation.service === 'SMS' || conversation.isGroupChat) return;
 
   await sendRequest('/api/send-typing-indicator', {
     method: 'POST',

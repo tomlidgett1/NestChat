@@ -13,6 +13,10 @@ import {
 } from './state.ts';
 import { EXTRACTOR_VERSION } from './env.ts';
 import { increment, METRICS } from './telemetry.ts';
+import { memoryContextHeader, contentHash } from './chunker.ts';
+import { embedChunks, type ChunkToEmbed } from './embedder.ts';
+import { softDeleteSource, insertEmbeddedChunks } from './ingestion-helpers.ts';
+import { getAdminClient } from './supabase.ts';
 
 const client = new Anthropic({
   apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
@@ -235,7 +239,13 @@ export async function extractCandidateMemories(
     const text = response.content.find((b) => b.type === 'text');
     if (!text || text.type !== 'text') return [];
 
-    const parsed = JSON.parse(text.text);
+    let rawText = text.text.trim();
+    const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) {
+      rawText = fenceMatch[1].trim();
+    }
+
+    const parsed = JSON.parse(rawText);
     const rawCandidates = parsed?.candidates;
     if (!Array.isArray(rawCandidates)) return [];
 
@@ -551,6 +561,56 @@ export async function writeMemoryItem(
 }
 
 // ============================================================================
+// RAG Embedding — index memory items into search_documents/search_embeddings
+// ============================================================================
+
+async function embedMemoryItem(
+  handle: string,
+  memoryId: number,
+  memoryType: string,
+  category: string,
+  valueText: string,
+): Promise<void> {
+  const supabase = getAdminClient();
+  const sourceId = `memory:${memoryId}`;
+
+  try {
+    await softDeleteSource(supabase, handle, 'memory_summary', sourceId);
+
+    const header = memoryContextHeader(category, memoryType, handle, new Date().toISOString());
+    const chunk: ChunkToEmbed = {
+      text: `${header}\n---\n${valueText}`,
+      sourceType: 'memory_summary',
+      sourceId,
+      title: `${category}: ${valueText.slice(0, 80)}`,
+      chunkIndex: 0,
+      contentHash: contentHash('memory_summary', sourceId, 'summary'),
+      metadata: { memory_id: memoryId, category, memory_type: memoryType, handle },
+    };
+
+    const embedded = await embedChunks([chunk]);
+    const { inserted, errors } = await insertEmbeddedChunks(supabase, handle, embedded);
+    if (errors > 0) {
+      console.warn(`[memory] embedMemoryItem ${memoryId}: ${inserted} inserted, ${errors} errors`);
+    }
+  } catch (err) {
+    console.warn(`[memory] Failed to embed memory ${memoryId}:`, (err as Error).message);
+  }
+}
+
+function fireAndForgetEmbed(
+  handle: string,
+  memoryId: number | null,
+  memoryType: string,
+  category: string,
+  valueText: string,
+): void {
+  if (!memoryId) return;
+  embedMemoryItem(handle, memoryId, memoryType, category, valueText)
+    .catch((err) => console.warn('[memory] Background embed failed:', (err as Error).message));
+}
+
+// ============================================================================
 // Full Pipeline: extract -> normalise -> filter -> adjudicate -> write
 // ============================================================================
 
@@ -621,11 +681,13 @@ export async function processMemoryExtraction(
     } else if (action.type === 'SUPERSEDE_EXISTING') {
       result.memoriesWritten += 1;
       increment(METRICS.MEMORIES_SUPERSEDED);
+      fireAndForgetEmbed(candidate.handle, memoryId, candidate.memoryType, candidate.category, candidate.valueText);
       const updatedMemories = await getActiveMemoryItems(candidate.handle, 30);
       existingByHandle.set(candidate.handle, updatedMemories);
     } else {
       result.memoriesWritten += 1;
       increment(METRICS.MEMORIES_WRITTEN);
+      fireAndForgetEmbed(candidate.handle, memoryId, candidate.memoryType, candidate.category, candidate.valueText);
       const updatedMemories = await getActiveMemoryItems(candidate.handle, 30);
       existingByHandle.set(candidate.handle, updatedMemories);
     }
@@ -690,6 +752,7 @@ export async function processRealtimeMemory(
     if (id !== null) {
       anyWritten = true;
       lastMemoryId = id;
+      fireAndForgetEmbed(handle, id, 'identity', 'name', name);
     }
   }
 
@@ -711,6 +774,7 @@ export async function processRealtimeMemory(
     if (id !== null) {
       anyWritten = true;
       lastMemoryId = id;
+      fireAndForgetEmbed(handle, id, 'bio_fact', factCategory, fact);
     }
   }
 

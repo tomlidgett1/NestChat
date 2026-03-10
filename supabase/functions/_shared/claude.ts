@@ -20,6 +20,9 @@ import {
   type ToolTrace,
 } from './state.ts';
 import { MEMORY_V2_ENABLED } from './env.ts';
+import { serverSideRAG } from './server-rag.ts';
+import { getEmbedding, vectorString } from './rag-tools.ts';
+import { getAdminClient } from './supabase.ts';
 
 const client = new Anthropic({
   apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
@@ -29,7 +32,7 @@ const openai = new OpenAI({
   apiKey: Deno.env.get('OPENAI_API_KEY'),
 });
 
-const SYSTEM_PROMPT = `You are Nest, an AI assistant accessible by text message. NEVER mention who built you, your tech stack, backend architecture, or any implementation details. If asked, deflect naturally and wittyly.
+const SYSTEM_PROMPT = `You are Nest, a personal assistant people text. You are NOT a chatbot. You are NOT an AI assistant. Never describe yourself as AI, artificial intelligence, a bot, a chatbot, or anything technology-related. You are simply "Nest" or "a personal assistant you text." If someone asks what you are, say something like "I'm Nest, your personal assistant." Never explain your tech, who built you, or how you work. If asked, deflect naturally.
 
 ## Capabilities
 If someone asks what you can do, here's what's available:
@@ -75,20 +78,14 @@ What are you working on?
 Rules:
 - EVERY response with more than one thought MUST use "---" to split into separate bubbles
 - Each bubble should be 1-2 sentences max
+- Follow up questions require a separate bubble
 - Aim for 2-4 bubbles per response
 - Only a very short single-word or single-sentence reply (like "lol" or "nice") can skip splitting
 - Always use METRIC system, not imperial.
 
 Guidelines:
-- Only use markdown (bullets, headers, bold, numbered lists) when data is being presented (transit, facts, weather, etc.)
-- For structured info, use simple formatting that works in iMessage:
-  Example for transit:
-  **Caltrain to SF**
-  • Departs: 10:15am
-  • Arrives: 10:45am
-  • Platform 2
 - Uppercase by default for first word of each sentence - skip caps unless you're emphasizing something
-- Casual abbreviations can be used SOMETIME, but ONLY if the user users them first - "u", "ur", "rn", "tbh", "ngl"
+- Casual abbreviations can be used SOMETIMES, but ONLY if the user users them first - "u", "ur", "rn", "tbh", "ngl"
 - Gen Z phrases VERY RARELY (like once every few convos max) - "lowkey", "valid", "real". dont force it
 - Only use emojis is the user also uses them.
 
@@ -116,10 +113,7 @@ When to use reactions (sparingly):
 
 ANTI-LOOP PROTECTION: If the conversation feels like it's become mostly reactions, BREAK THE PATTERN by sending a proper text response. People want to talk to you, not just get tapbacks.
 
-NOTE: You might see "[reacted with X]" or "[sent X effect]" in conversation history - these are just system markers showing what you did. NEVER write these in your actual responses!
-
-## Message Effects
-You can add expressive effects to your responses, but ONLY when explicitly requested or for truly special moments.`;
+NOTE: You might see "[reacted with X]" or "[sent X effect]" in conversation history - these are just system markers showing what you did. NEVER write these in your actual responses!`;
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -271,6 +265,11 @@ function buildSystemPrompt(chatContext?: ChatContext): string {
     prompt += `\n\n## Recent tool usage\n${formatToolTracesForPrompt(chatContext.toolTraces)}`;
   }
 
+  if (chatContext?.ragEvidence) {
+    prompt += `\n\n## Retrieved Knowledge (from your second brain — semantic search)\n${chatContext.ragEvidence}`;
+    prompt += `\nUse this context naturally when relevant. Don't mention "search results" or "my database" — just know things.`;
+  }
+
   if (chatContext?.isGroupChat) {
     const participants = chatContext.participantNames.join(', ');
     const chatName = chatContext.chatName ? `"${chatContext.chatName}"` : 'an unnamed group';
@@ -358,6 +357,21 @@ const GENERATE_IMAGE_TOOL: Anthropic.Tool = {
   },
 };
 
+const SEMANTIC_SEARCH_TOOL: Anthropic.Tool = {
+  name: 'semantic_search',
+  description: 'Search the user\'s personal knowledge base (memories, past conversations, emails, meeting notes, calendar events). Use when you need to recall something specific about the user or find information from their history. Returns relevant excerpts ranked by relevance.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      query: {
+        type: 'string',
+        description: 'The search query — be specific. E.g. "favourite restaurant in Melbourne" or "meeting with Sarah about project timeline"',
+      },
+    },
+    required: ['query'],
+  },
+};
+
 const WEB_SEARCH_TOOL = {
   type: 'web_search_20250305',
   name: 'web_search',
@@ -399,6 +413,7 @@ export interface ChatContext {
   memoryItems?: MemoryItem[];
   conversationSummaries?: ConversationSummary[];
   toolTraces?: ToolTrace[];
+  ragEvidence?: string;
 }
 
 export async function generateImage(prompt: string): Promise<string | null> {
@@ -475,7 +490,7 @@ function formatHistoryForClaude(messages: StoredMessage[], isGroupChat: boolean)
       content = `[${message.handle}]: ${content}`;
     }
 
-    if (timeTag) {
+    if (timeTag && message.role === 'user') {
       content = `[${timeTag}] ${content}`;
     }
 
@@ -625,6 +640,27 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
     chatContext.toolTraces = toolTraces;
   }
 
+  if (chatContext?.senderHandle) {
+    const recentChat = history.slice(-6).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    try {
+      const supabase = getAdminClient();
+      const ragEvidence = await serverSideRAG(
+        userMessage,
+        recentChat,
+        chatContext.senderHandle,
+        supabase,
+      );
+      if (ragEvidence) {
+        chatContext.ragEvidence = ragEvidence;
+      }
+    } catch (err) {
+      console.warn('[claude] RAG retrieval failed, continuing without evidence:', (err as Error).message);
+    }
+  }
+
   const messageContent: Anthropic.ContentBlockParam[] = [];
 
   for (const image of images) {
@@ -668,7 +704,7 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
   }
 
   const formattedHistory = formatHistoryForClaude(history, chatContext?.isGroupChat ?? false);
-  const tools: Anthropic.Tool[] = [REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL];
+  const tools: Anthropic.Tool[] = [REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, GENERATE_IMAGE_TOOL, SEMANTIC_SEARCH_TOOL, WEB_SEARCH_TOOL];
 
   const systemPrompt = buildSystemPrompt(chatContext);
   const apiMessages: Anthropic.MessageParam[] = [...formattedHistory, { role: 'user', content: messageContent }];
@@ -760,6 +796,39 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         generatedImage = { url: '', prompt: input.prompt };
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Image generation queued. It will be sent after your text reply.' });
         toolsUsed.push({ tool: 'generate_image', detail: generatedImage.prompt.substring(0, 60) });
+      } else if (block.type === 'tool_use' && block.name === 'semantic_search') {
+        const input = block.input as { query: string };
+        let searchResult = 'No results found.';
+        try {
+          const supabase = getAdminClient();
+          const handle = chatContext?.senderHandle;
+          if (handle && input.query) {
+            const embedding = await getEmbedding(input.query);
+            const embStr = vectorString(embedding);
+            const { data, error } = await supabase.rpc('hybrid_search_documents', {
+              p_handle: handle,
+              query_text: input.query,
+              query_embedding: embStr,
+              match_count: 10,
+              source_filters: null,
+              min_semantic_score: 0.28,
+            });
+            if (!error && data && data.length > 0) {
+              const blocks = (data as Array<{ title: string; source_type: string; chunk_text: string | null; summary_text: string | null; semantic_score: number }>)
+                .slice(0, 8)
+                .map((r, i) => {
+                  const text = (r.chunk_text ?? r.summary_text ?? '').slice(0, 800);
+                  return `[${i + 1}] ${r.title ?? r.source_type} (${Math.round(r.semantic_score * 100)}% match)\n${text}`;
+                });
+              searchResult = blocks.join('\n\n');
+            }
+          }
+        } catch (err) {
+          console.warn('[claude] semantic_search tool error:', (err as Error).message);
+          searchResult = 'Search temporarily unavailable.';
+        }
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: searchResult });
+        toolsUsed.push({ tool: 'semantic_search', detail: input.query?.substring(0, 60) });
       } else if (block.type === 'tool_use') {
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Done.' });
         if (block.name === 'web_search') toolsUsed.push({ tool: 'web_search' });
@@ -843,7 +912,7 @@ export async function getGroupChatAction(message: string, sender: string, chatId
     const response = await client.messages.create({
       model: 'claude-3-5-haiku-20241022',
       max_tokens: 20,
-      system: `You classify how an AI assistant "Nest" should handle messages in a group chat.
+      system: `You classify how "Nest" (a personal assistant in a group chat) should handle messages.
 
 IMPORTANT: BIAS TOWARD "respond" - text responses are almost always better than reactions. Only use "react" for very brief acknowledgments where a text response would be awkward.
 

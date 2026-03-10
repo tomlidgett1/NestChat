@@ -885,6 +885,22 @@ export interface NestUser {
   onboardCount: number;
   botNumber: string | null;
   pdlProfile: Record<string, unknown> | null;
+  authUserId: string | null;
+  onboardState: string;
+  entryState: string | null;
+  firstValueWedge: string | null;
+  firstValueDeliveredAt: string | null;
+  secondEngagementAt: string | null;
+  checkinOptIn: boolean | null;
+  activationScore: number;
+  capabilityCategoriesUsed: string[];
+  lastProactiveSentAt: string | null;
+  lastProactiveIgnored: boolean;
+  proactiveIgnoreCount: number;
+  recoveryNudgeSentAt: string | null;
+  timezone: string | null;
+  firstSeen: number;
+  lastSeen: number;
 }
 
 interface EnsureNestUserRow {
@@ -896,6 +912,22 @@ interface EnsureNestUserRow {
   out_onboard_count: number;
   out_bot_number: string | null;
   out_pdl_profile: Record<string, unknown> | null;
+  out_auth_user_id: string | null;
+  out_onboard_state: string;
+  out_entry_state: string | null;
+  out_first_value_wedge: string | null;
+  out_first_value_delivered_at: string | null;
+  out_second_engagement_at: string | null;
+  out_checkin_opt_in: boolean | null;
+  out_activation_score: number;
+  out_capability_categories_used: string[];
+  out_last_proactive_sent_at: string | null;
+  out_last_proactive_ignored: boolean;
+  out_proactive_ignore_count: number;
+  out_recovery_nudge_sent_at: string | null;
+  out_timezone: string | null;
+  out_first_seen: number;
+  out_last_seen: number;
 }
 
 function parseOnboardMessages(raw: unknown): Array<{ role: string; content: string }> {
@@ -916,6 +948,22 @@ function rowToNestUser(row: EnsureNestUserRow): NestUser {
     onboardCount: row.out_onboard_count,
     botNumber: row.out_bot_number,
     pdlProfile: row.out_pdl_profile,
+    authUserId: row.out_auth_user_id ?? null,
+    onboardState: row.out_onboard_state ?? 'new_user_unclassified',
+    entryState: row.out_entry_state ?? null,
+    firstValueWedge: row.out_first_value_wedge ?? null,
+    firstValueDeliveredAt: row.out_first_value_delivered_at ?? null,
+    secondEngagementAt: row.out_second_engagement_at ?? null,
+    checkinOptIn: row.out_checkin_opt_in ?? null,
+    activationScore: row.out_activation_score ?? 0,
+    capabilityCategoriesUsed: row.out_capability_categories_used ?? [],
+    lastProactiveSentAt: row.out_last_proactive_sent_at ?? null,
+    lastProactiveIgnored: row.out_last_proactive_ignored ?? false,
+    proactiveIgnoreCount: row.out_proactive_ignore_count ?? 0,
+    recoveryNudgeSentAt: row.out_recovery_nudge_sent_at ?? null,
+    timezone: row.out_timezone ?? null,
+    firstSeen: row.out_first_seen ?? 0,
+    lastSeen: row.out_last_seen ?? 0,
   };
 }
 
@@ -948,10 +996,9 @@ export async function updateOnboardState(
   const patch: Record<string, unknown> = {
     onboard_messages: messages,
     onboard_count: count,
-    updated_at: new Date().toISOString(),
   };
 
-  if (pdlProfile !== undefined) {
+  if (pdlProfile !== undefined && pdlProfile !== null) {
     patch.pdl_profile = pdlProfile;
   }
 
@@ -961,7 +1008,8 @@ export async function updateOnboardState(
     .eq('handle', handle);
 
   if (error) {
-    console.error('[state] Error updating onboard state:', error);
+    console.error('[state] Error updating onboard state:', error.message);
+    throw new Error(`updateOnboardState failed: ${error.message}`);
   }
 }
 
@@ -983,14 +1031,332 @@ export async function getUserByToken(token: string): Promise<NestUser | null> {
   const supabase = getAdminClient();
   const { data, error } = await supabase
     .from(USER_PROFILES_TABLE)
-    .select('handle, name, status, onboarding_token, onboard_messages, onboard_count, bot_number, pdl_profile')
+    .select('handle, name, status, onboarding_token, onboard_messages, onboard_count, bot_number, pdl_profile, auth_user_id, onboard_state, entry_state, first_value_wedge, first_value_delivered_at, second_engagement_at, checkin_opt_in, activation_score, capability_categories_used, last_proactive_sent_at, last_proactive_ignored, proactive_ignore_count, recovery_nudge_sent_at, timezone, first_seen, last_seen')
     .eq('onboarding_token', token)
-    .maybeSingle<EnsureNestUserRow>();
+    .maybeSingle();
 
   if (error) {
     console.error('[state] Error getting user by token:', error);
     return null;
   }
 
-  return data ? rowToNestUser(data) : null;
+  if (!data) return null;
+
+  return {
+    handle: data.handle,
+    name: data.name,
+    status: data.status,
+    onboardingToken: data.onboarding_token,
+    onboardMessages: parseOnboardMessages(data.onboard_messages),
+    onboardCount: data.onboard_count,
+    botNumber: data.bot_number,
+    pdlProfile: data.pdl_profile,
+    authUserId: data.auth_user_id ?? null,
+    onboardState: data.onboard_state ?? 'new_user_unclassified',
+    entryState: data.entry_state ?? null,
+    firstValueWedge: data.first_value_wedge ?? null,
+    firstValueDeliveredAt: data.first_value_delivered_at ?? null,
+    secondEngagementAt: data.second_engagement_at ?? null,
+    checkinOptIn: data.checkin_opt_in ?? null,
+    activationScore: data.activation_score ?? 0,
+    capabilityCategoriesUsed: data.capability_categories_used ?? [],
+    lastProactiveSentAt: data.last_proactive_sent_at ?? null,
+    lastProactiveIgnored: data.last_proactive_ignored ?? false,
+    proactiveIgnoreCount: data.proactive_ignore_count ?? 0,
+    recoveryNudgeSentAt: data.recovery_nudge_sent_at ?? null,
+    timezone: data.timezone ?? null,
+    firstSeen: data.first_seen ?? 0,
+    lastSeen: data.last_seen ?? 0,
+  };
+}
+
+// ============================================================================
+// First 48 Hours: State Machine, Events, Proactive, Experiments
+// ============================================================================
+
+export type OnboardState =
+  | 'new_user_unclassified'
+  | 'new_user_intro_started'
+  | 'first_value_pending'
+  | 'first_value_delivered'
+  | 'follow_through_pending'
+  | 'follow_through_delivered'
+  | 'second_engagement_observed'
+  | 'checkin_permission_eligible'
+  | 'checkin_opted_in'
+  | 'checkin_declined'
+  | 'memory_moment_eligible'
+  | 'memory_moment_delivered'
+  | 'referral_eligible'
+  | 'quiet_user'
+  | 'spam_hold'
+  | 'at_risk'
+  | 'activated';
+
+export type EntryState =
+  | 'curious_opener'
+  | 'direct_task_opener'
+  | 'drafting_opener'
+  | 'overwhelm_opener'
+  | 'referral_opener'
+  | 'trust_opener'
+  | 'ambiguous_opener';
+
+export type ValueWedge = 'offload' | 'draft' | 'organise' | 'ask_plan';
+
+export type OnboardingEventType =
+  | 'new_user_first_inbound_received'
+  | 'new_user_entry_state_classified'
+  | 'new_user_name_captured'
+  | 'new_user_clarification_requested'
+  | 'new_user_first_value_wedge_selected'
+  | 'first_value_delivered'
+  | 'first_value_type_offload'
+  | 'first_value_type_draft'
+  | 'first_value_type_organise'
+  | 'first_value_time_to_delivery'
+  | 'first_value_failed'
+  | 'reminder_created'
+  | 'reminder_confirmed'
+  | 'reminder_delivered'
+  | 'reminder_acknowledged'
+  | 'reminder_missed'
+  | 'reminder_corrected'
+  | 'recovery_nudge_sent'
+  | 'recovery_nudge_ignored'
+  | 'recovery_nudge_replied'
+  | 'checkin_permission_offered'
+  | 'checkin_permission_accepted'
+  | 'checkin_permission_declined'
+  | 'morning_checkin_sent'
+  | 'morning_checkin_replied'
+  | 'proactive_hold_due_to_spam_rule'
+  | 'memory_candidate_generated'
+  | 'memory_candidate_rejected_low_confidence'
+  | 'memory_candidate_rejected_creep_risk'
+  | 'memory_moment_sent'
+  | 'memory_moment_positive_response'
+  | 'memory_moment_correction'
+  | 'trust_hesitation_detected'
+  | 'trust_reassurance_sent'
+  | 'error_misunderstanding_detected'
+  | 'error_hallucination_detected'
+  | 'error_recovery_success'
+  | 'error_recovery_failure'
+  | 'second_engagement_observed'
+  | 'second_capability_used'
+  | 'day2_return'
+  | 'activated_composite'
+  | 'at_risk_48h';
+
+export interface EmitEventParams {
+  handle: string;
+  chatId?: string;
+  eventType: OnboardingEventType;
+  messageTurnIndex?: number;
+  entryState?: string;
+  valueWedge?: string;
+  currentState?: string;
+  experimentVariantIds?: string[];
+  confidenceScores?: Record<string, number>;
+  payload?: Record<string, unknown>;
+}
+
+export async function emitOnboardingEvent(params: EmitEventParams): Promise<void> {
+  const supabase = getAdminClient();
+  const { error } = await supabase.rpc('emit_onboarding_event', {
+    p_handle: params.handle,
+    p_chat_id: params.chatId ?? null,
+    p_event_type: params.eventType,
+    p_message_turn_index: params.messageTurnIndex ?? null,
+    p_entry_state: params.entryState ?? null,
+    p_value_wedge: params.valueWedge ?? null,
+    p_current_state: params.currentState ?? null,
+    p_experiment_variant_ids: JSON.stringify(params.experimentVariantIds ?? []),
+    p_confidence_scores: params.confidenceScores ? JSON.stringify(params.confidenceScores) : null,
+    p_payload: JSON.stringify(params.payload ?? {}),
+  });
+
+  if (error) {
+    console.error('[state] Error emitting onboarding event:', error.message);
+  }
+}
+
+export interface StateTransitionParams {
+  handle: string;
+  newState: OnboardState;
+  entryState?: string;
+  firstValueWedge?: string;
+  firstValueDelivered?: boolean;
+  followThroughDelivered?: boolean;
+  secondEngagement?: boolean;
+  checkinOptIn?: boolean;
+  memoryMomentDelivered?: boolean;
+  activated?: boolean;
+  atRisk?: boolean;
+  capabilityCategory?: string;
+  timezone?: string;
+}
+
+export async function transitionOnboardState(params: StateTransitionParams): Promise<string | null> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('update_onboard_state_machine', {
+    p_handle: params.handle,
+    p_new_state: params.newState,
+    p_entry_state: params.entryState ?? null,
+    p_first_value_wedge: params.firstValueWedge ?? null,
+    p_first_value_delivered: params.firstValueDelivered ?? false,
+    p_follow_through_delivered: params.followThroughDelivered ?? false,
+    p_second_engagement: params.secondEngagement ?? false,
+    p_checkin_opt_in: params.checkinOptIn ?? null,
+    p_memory_moment_delivered: params.memoryMomentDelivered ?? false,
+    p_activated: params.activated ?? false,
+    p_at_risk: params.atRisk ?? false,
+    p_capability_category: params.capabilityCategory ?? null,
+    p_timezone: params.timezone ?? null,
+  });
+
+  if (error) {
+    console.error('[state] Error transitioning onboard state:', error.message);
+    return null;
+  }
+
+  return data as string | null;
+}
+
+export async function recordProactiveMessage(
+  handle: string,
+  chatId: string,
+  messageType: string,
+  content: string,
+  metadata?: Record<string, unknown>,
+): Promise<number | null> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('record_proactive_message', {
+    p_handle: handle,
+    p_chat_id: chatId,
+    p_message_type: messageType,
+    p_content: content,
+    p_metadata: JSON.stringify(metadata ?? {}),
+  });
+
+  if (error) {
+    console.error('[state] Error recording proactive message:', error.message);
+    return null;
+  }
+
+  return data as number;
+}
+
+export async function markProactiveReplied(handle: string): Promise<void> {
+  const supabase = getAdminClient();
+  const { error } = await supabase.rpc('mark_proactive_replied', {
+    p_handle: handle,
+  });
+
+  if (error) {
+    console.error('[state] Error marking proactive replied:', error.message);
+  }
+}
+
+export interface ProactiveEligibleUser {
+  handle: string;
+  name: string | null;
+  onboardState: string;
+  entryState: string | null;
+  firstValueWedge: string | null;
+  firstValueDeliveredAt: string | null;
+  followThroughDeliveredAt: string | null;
+  secondEngagementAt: string | null;
+  checkinOptIn: boolean | null;
+  checkinDeclineAt: string | null;
+  memoryMomentDeliveredAt: string | null;
+  activatedAt: string | null;
+  lastProactiveSentAt: string | null;
+  lastProactiveIgnored: boolean;
+  proactiveIgnoreCount: number;
+  recoveryNudgeSentAt: string | null;
+  activationScore: number;
+  capabilityCategoriesUsed: string[];
+  botNumber: string | null;
+  firstSeen: number;
+  lastSeen: number;
+  onboardCount: number;
+  timezone: string | null;
+}
+
+export async function getProactiveEligibleUsers(limit = 20): Promise<ProactiveEligibleUser[]> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('get_proactive_eligible_users', {
+    p_limit: limit,
+  });
+
+  if (error) {
+    console.error('[state] Error getting proactive eligible users:', error.message);
+    return [];
+  }
+
+  if (!data || !Array.isArray(data)) return [];
+
+  return (data as Record<string, unknown>[]).map((row) => ({
+    handle: row.handle as string,
+    name: row.name as string | null,
+    onboardState: row.onboard_state as string,
+    entryState: row.entry_state as string | null,
+    firstValueWedge: row.first_value_wedge as string | null,
+    firstValueDeliveredAt: row.first_value_delivered_at as string | null,
+    followThroughDeliveredAt: row.follow_through_delivered_at as string | null,
+    secondEngagementAt: row.second_engagement_at as string | null,
+    checkinOptIn: row.checkin_opt_in as boolean | null,
+    checkinDeclineAt: row.checkin_decline_at as string | null,
+    memoryMomentDeliveredAt: row.memory_moment_delivered_at as string | null,
+    activatedAt: row.activated_at as string | null,
+    lastProactiveSentAt: row.last_proactive_sent_at as string | null,
+    lastProactiveIgnored: row.last_proactive_ignored as boolean,
+    proactiveIgnoreCount: row.proactive_ignore_count as number,
+    recoveryNudgeSentAt: row.recovery_nudge_sent_at as string | null,
+    activationScore: row.activation_score as number,
+    capabilityCategoriesUsed: row.capability_categories_used as string[],
+    botNumber: row.bot_number as string | null,
+    firstSeen: row.first_seen as number,
+    lastSeen: row.last_seen as number,
+    onboardCount: row.onboard_count as number,
+    timezone: row.timezone as string | null,
+  }));
+}
+
+export async function assignExperiment(
+  handle: string,
+  experimentName: string,
+  variants: string[],
+): Promise<string> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('assign_experiment', {
+    p_handle: handle,
+    p_experiment_name: experimentName,
+    p_variants: variants,
+  });
+
+  if (error) {
+    console.error('[state] Error assigning experiment:', error.message);
+    return variants[0];
+  }
+
+  return (data as string) || variants[0];
+}
+
+export async function getUserExperiments(handle: string): Promise<Record<string, string>> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase
+    .from('experiment_assignments')
+    .select('experiment_name, variant')
+    .eq('handle', handle);
+
+  if (error || !data) return {};
+
+  const result: Record<string, string> = {};
+  for (const row of data as { experiment_name: string; variant: string }[]) {
+    result[row.experiment_name] = row.variant;
+  }
+  return result;
 }

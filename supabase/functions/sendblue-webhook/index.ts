@@ -1,7 +1,9 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getOptionalEnv } from '../_shared/env.ts';
-import { normaliseIncomingMessage, isAllowedSender, isIgnoredSender, isInboundReceiveWebhook, type SendblueWebhookEvent, shouldProcessBotNumber } from '../_shared/sendblue.ts';
+import { normaliseIncomingMessage, isAllowedSender, isIgnoredSender, isInboundReceiveWebhook, type SendblueWebhookEvent, shouldProcessBotNumber, markAsRead, startTyping } from '../_shared/sendblue.ts';
 import { processMessage } from '../_shared/pipeline.ts';
+
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -59,11 +61,13 @@ Deno.serve(async (req) => {
     bot: message.conversation.fromNumber,
   });
 
-  try {
-    await processMessage(message);
-  } catch (err) {
-    console.error('[sendblue-webhook] processing failed:', err);
-  }
+  EdgeRuntime.waitUntil(
+    Promise.all([
+      markAsRead(message.conversation),
+      startTyping(message.conversation),
+      processMessage(message),
+    ]).catch((err) => console.error('[sendblue-webhook] processing failed:', err)),
+  );
 
   return jsonResponse({ received: true }, 200);
 });
