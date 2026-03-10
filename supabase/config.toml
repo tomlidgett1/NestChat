@@ -1,0 +1,22 @@
+project_id = "oypzijwqmkxktvgtsqkp"
+
+[functions.sendblue-webhook]
+verify_jwt = false
+
+[functions.sendblue-outbound-webhook]
+verify_jwt = false
+
+[functions.process-inbound-queue]
+verify_jwt = false
+
+[functions.configure-sendblue-webhooks]
+verify_jwt = false
+
+[functions.poll-inbound-messages]
+verify_jwt = true
+
+[functions.summarise-conversations]
+verify_jwt = false
+
+[functions.nest-onboard]
+verify_jwt = false

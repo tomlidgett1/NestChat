@@ -1,10 +1,7 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
+import { getSupabase } from '../lib/supabase.js';
 
-// DynamoDB setup
-const client = new DynamoDBClient({ region: 'us-east-1' });
-const docClient = DynamoDBDocumentClient.from(client);
-const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || 'linq-blue-agent-example';
+const CONVERSATIONS_TABLE = process.env.SUPABASE_CONVERSATIONS_TABLE || 'conversations';
+const USER_PROFILES_TABLE = process.env.SUPABASE_USER_PROFILES_TABLE || 'user_profiles';
 
 // TTL: 1 hour for conversations
 const CONVERSATION_TTL_SECONDS = 60 * 60;
@@ -17,23 +14,65 @@ export interface StoredMessage {
 }
 
 interface ConversationRecord {
-  pk: string;
+  chat_id: string;
   messages: StoredMessage[];
-  lastActive: number;
-  ttl: number;
+  last_active: number;
+  expires_at: string;
+}
+
+function sanitiseMessages(value: unknown): StoredMessage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is StoredMessage => {
+      if (!item || typeof item !== 'object') {
+        return false;
+      }
+
+      const record = item as Record<string, unknown>;
+      const role = record.role;
+      const content = record.content;
+      const handle = record.handle;
+
+      return (
+        (role === 'user' || role === 'assistant') &&
+        typeof content === 'string' &&
+        (typeof handle === 'undefined' || typeof handle === 'string')
+      );
+    })
+    .map(item => ({
+      role: item.role,
+      content: item.content,
+      ...(item.handle ? { handle: item.handle } : {}),
+    }));
 }
 
 export async function getConversation(chatId: string): Promise<StoredMessage[]> {
   try {
-    const result = await docClient.send(new GetCommand({
-      TableName: TABLE_NAME,
-      Key: { pk: `CHAT#${chatId}` },
-    }));
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from(CONVERSATIONS_TABLE)
+      .select('chat_id, messages, last_active, expires_at')
+      .eq('chat_id', chatId)
+      .maybeSingle<ConversationRecord>();
 
-    if (!result.Item) return [];
+    if (error) {
+      console.error('[conversation] Error getting conversation:', error);
+      return [];
+    }
 
-    const record = result.Item as ConversationRecord;
-    return record.messages || [];
+    if (!data) {
+      return [];
+    }
+
+    if (new Date(data.expires_at).getTime() <= Date.now()) {
+      await clearConversation(chatId);
+      return [];
+    }
+
+    return sanitiseMessages(data.messages);
   } catch (error) {
     console.error('[conversation] Error getting conversation:', error);
     return [];
@@ -42,30 +81,33 @@ export async function getConversation(chatId: string): Promise<StoredMessage[]> 
 
 export async function addMessage(chatId: string, role: 'user' | 'assistant', content: string, handle?: string): Promise<void> {
   try {
-    // Get existing conversation
     const messages = await getConversation(chatId);
 
-    // Add new message with optional sender handle
     const newMessage: StoredMessage = { role, content };
     if (handle) {
       newMessage.handle = handle;
     }
     messages.push(newMessage);
 
-    // Keep only last 20 messages
     const trimmedMessages = messages.slice(-20);
-
     const now = Math.floor(Date.now() / 1000);
+    const expiresAt = new Date((now + CONVERSATION_TTL_SECONDS) * 1000).toISOString();
+    const supabase = getSupabase();
 
-    await docClient.send(new PutCommand({
-      TableName: TABLE_NAME,
-      Item: {
-        pk: `CHAT#${chatId}`,
+    const { error } = await supabase
+      .from(CONVERSATIONS_TABLE)
+      .upsert({
+        chat_id: chatId,
         messages: trimmedMessages,
-        lastActive: now,
-        ttl: now + CONVERSATION_TTL_SECONDS,
-      },
-    }));
+        last_active: now,
+        expires_at: expiresAt,
+      }, {
+        onConflict: 'chat_id',
+      });
+
+    if (error) {
+      throw error;
+    }
   } catch (error) {
     console.error('[conversation] Error adding message:', error);
   }
@@ -73,18 +115,34 @@ export async function addMessage(chatId: string, role: 'user' | 'assistant', con
 
 export async function clearConversation(chatId: string): Promise<void> {
   try {
-    await docClient.send(new DeleteCommand({
-      TableName: TABLE_NAME,
-      Key: { pk: `CHAT#${chatId}` },
-    }));
+    const supabase = getSupabase();
+    const { error } = await supabase
+      .from(CONVERSATIONS_TABLE)
+      .delete()
+      .eq('chat_id', chatId);
+
+    if (error) {
+      throw error;
+    }
   } catch (error) {
     console.error('[conversation] Error clearing conversation:', error);
   }
 }
 
-// Not really needed with DynamoDB (TTL handles cleanup), but keep for compatibility
 export async function clearAllConversations(): Promise<void> {
-  console.log('[conversation] clearAllConversations not implemented for DynamoDB');
+  try {
+    const supabase = getSupabase();
+    const { error } = await supabase
+      .from(CONVERSATIONS_TABLE)
+      .delete()
+      .gte('chat_id', '');
+
+    if (error) {
+      throw error;
+    }
+  } catch (error) {
+    console.error('[conversation] Error clearing all conversations:', error);
+  }
 }
 
 // ============================================================================
@@ -99,21 +157,44 @@ export interface UserProfile {
   lastSeen: number;
 }
 
+interface UserProfileRow {
+  handle: string;
+  name: string | null;
+  facts: unknown;
+  first_seen: number;
+  last_seen: number;
+}
+
+function sanitiseFacts(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((fact): fact is string => typeof fact === 'string');
+}
+
 export async function getUserProfile(handle: string): Promise<UserProfile | null> {
   try {
-    const result = await docClient.send(new GetCommand({
-      TableName: TABLE_NAME,
-      Key: { pk: `USER#${handle}` },
-    }));
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from(USER_PROFILES_TABLE)
+      .select('handle, name, facts, first_seen, last_seen')
+      .eq('handle', handle)
+      .maybeSingle<UserProfileRow>();
 
-    if (!result.Item) return null;
+    if (error) {
+      console.error('[conversation] Error getting user profile:', error);
+      return null;
+    }
+
+    if (!data) return null;
 
     return {
-      handle: result.Item.handle,
-      name: result.Item.name || null,
-      facts: result.Item.facts || [],
-      firstSeen: result.Item.firstSeen,
-      lastSeen: result.Item.lastSeen,
+      handle: data.handle,
+      name: data.name || null,
+      facts: sanitiseFacts(data.facts),
+      firstSeen: data.first_seen,
+      lastSeen: data.last_seen,
     };
   } catch (error) {
     console.error('[conversation] Error getting user profile:', error);
@@ -128,21 +209,25 @@ export async function updateUserProfile(
   try {
     const existing = await getUserProfile(handle);
     const now = Math.floor(Date.now() / 1000);
+    const supabase = getSupabase();
 
     const profile = {
-      pk: `USER#${handle}`,
       handle,
       name: updates.name ?? existing?.name ?? null,
       facts: updates.facts ?? existing?.facts ?? [],
-      firstSeen: existing?.firstSeen ?? now,
-      lastSeen: now,
-      // No TTL - user profiles persist forever
+      first_seen: existing?.firstSeen ?? now,
+      last_seen: now,
     };
 
-    await docClient.send(new PutCommand({
-      TableName: TABLE_NAME,
-      Item: profile,
-    }));
+    const { error } = await supabase
+      .from(USER_PROFILES_TABLE)
+      .upsert(profile, {
+        onConflict: 'handle',
+      });
+
+    if (error) {
+      throw error;
+    }
 
     console.log(`[conversation] Updated profile for ${handle}: name=${profile.name}, facts=${profile.facts.length}`);
   } catch (error) {
@@ -189,10 +274,16 @@ export async function setUserName(handle: string, name: string): Promise<boolean
 
 export async function clearUserProfile(handle: string): Promise<boolean> {
   try {
-    await docClient.send(new DeleteCommand({
-      TableName: TABLE_NAME,
-      Key: { pk: `USER#${handle}` },
-    }));
+    const supabase = getSupabase();
+    const { error } = await supabase
+      .from(USER_PROFILES_TABLE)
+      .delete()
+      .eq('handle', handle);
+
+    if (error) {
+      throw error;
+    }
+
     console.log(`[conversation] Cleared profile for ${handle}`);
     return true;
   } catch (error) {

@@ -1,17 +1,16 @@
 {
-  "name": "linq-blue-agent-example",
+  "name": "nest-sendblue-agent",
   "version": "1.0.0",
-  "description": "Example AI agent built on Linq Messaging API - showcases Claude AI integration with iMessage, web search, image generation, and more",
+  "description": "Example AI agent built on Sendblue - showcases Claude integration with messaging, web search, image generation, and more",
   "main": "dist/index.js",
-  "author": "Linq Technologies Incorporated",
+  "author": "Nest",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/linq-team/ai-agent-example.git"
   },
   "keywords": [
-    "linq",
-    "linq-blue",
+    "sendblue",
     "imessage",
     "claude",
     "anthropic",
@@ -30,8 +29,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@aws-sdk/client-dynamodb": "^3.971.0",
-    "@aws-sdk/lib-dynamodb": "^3.971.0",
+    "@supabase/supabase-js": "^2.98.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.0",
     "openai": "^6.16.0"

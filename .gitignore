@@ -9,5 +9,8 @@ CLAUDE.md
 # Codex local configuration
 .codex/
 
+# Supabase CLI temp files
+supabase/.temp/
+
 # OpenAPI spec (get latest from https://apidocs.linqapp.com)
 linqV3api.yaml

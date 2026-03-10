@@ -1,96 +1,105 @@
 import { Request, Response } from 'express';
 import {
-  WebhookEvent,
-  isMessageReceivedEvent,
-  extractTextContent,
-  extractImageUrls,
-  extractAudioUrls,
-  ExtractedMedia,
-  MessageEffect,
-  ReplyTo,
+  SendblueWebhookEvent,
+  NormalisedIncomingMessage,
+  isInboundReceiveWebhook,
+  normaliseIncomingMessage,
 } from './types.js';
 
-export type MessageService = 'iMessage' | 'SMS' | 'RCS';
-
 export interface MessageHandler {
-  (chatId: string, from: string, text: string, messageId: string, images: ExtractedMedia[], audio: ExtractedMedia[], incomingEffect?: MessageEffect, incomingReplyTo?: ReplyTo, service?: MessageService): Promise<void>;
+  (message: NormalisedIncomingMessage): Promise<void>;
 }
 
 export function createWebhookHandler(onMessage: MessageHandler) {
-  // Bot numbers this agent runs on (comma-separated, supports multiple)
-  // If not set, responds to messages to any number
-  const botNumbers = process.env.LINQ_AGENT_BOT_NUMBERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
-  // Sender numbers to ignore (comma-separated)
+  const botNumbers = (process.env.SENDBLUE_BOT_NUMBERS || '')
+    .split(',')
+    .map(p => p.trim())
+    .filter(Boolean);
   const ignoredSenders = process.env.IGNORED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
-  // If set, ONLY respond to these sender numbers (for local dev)
   const allowedSenders = process.env.ALLOWED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
+  const webhookSecret = process.env.SENDBLUE_WEBHOOK_SECRET;
+  const webhookSecretHeader = (process.env.SENDBLUE_WEBHOOK_SECRET_HEADER || 'x-sendblue-secret').toLowerCase();
+  const processedMessages = new Map<string, number>();
+
+  function pruneProcessedMessages() {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [messageId, timestamp] of processedMessages.entries()) {
+      if (timestamp < cutoff) {
+        processedMessages.delete(messageId);
+      }
+    }
+  }
 
   return async (req: Request, res: Response) => {
-    const event = req.body as WebhookEvent;
+    if (webhookSecret) {
+      const providedSecret = req.header(webhookSecretHeader);
+      if (providedSecret !== webhookSecret) {
+        console.warn('[webhook] Invalid Sendblue webhook secret');
+        res.status(401).json({ error: 'invalid webhook secret' });
+        return;
+      }
+    }
 
-    const pstTime = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour12: false });
-    console.log(`[webhook] ${pstTime} PST | ${event.event_type} (${event.event_id})`);
+    const event = req.body as SendblueWebhookEvent;
+    const messageId = event.message_handle || 'unknown';
+    console.log(`[webhook] Incoming Sendblue payload ${messageId}`);
 
-    // Acknowledge receipt immediately
     res.status(200).json({ received: true });
 
-    // Process message.received events
-    if (isMessageReceivedEvent(event)) {
-      // Debug: log full webhook payload (only in development)
-      if (process.env.NODE_ENV !== 'production') {
-        console.log(`[webhook] Full payload:`, JSON.stringify(event, null, 2));
-      }
+    if (!isInboundReceiveWebhook(event)) {
+      console.log('[webhook] Ignoring non-inbound Sendblue event');
+      return;
+    }
 
-      const { chat_id, from, recipient_phone, message, service } = event.data;
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[webhook] Full payload:', JSON.stringify(event, null, 2));
+    }
 
-      // Only process messages sent to this bot's phone numbers
-      if (botNumbers.length > 0 && !botNumbers.includes(recipient_phone)) {
-        console.log(`[webhook] Skipping message to ${recipient_phone} (not this bot's number)`);
-        return;
-      }
+    pruneProcessedMessages();
+    if (processedMessages.has(messageId)) {
+      console.log(`[webhook] Duplicate message skipped: ${messageId}`);
+      return;
+    }
 
-      // Skip messages from ourselves
-      if (event.data.is_from_me) {
-        console.log(`[webhook] Skipping own message`);
-        return;
-      }
+    const message = normaliseIncomingMessage(event);
+    if (!message) {
+      console.log('[webhook] Failed to normalise incoming message');
+      return;
+    }
 
-      // If ALLOWED_SENDERS is set, only respond to those numbers
-      if (allowedSenders.length > 0 && !allowedSenders.includes(from)) {
-        console.log(`[webhook] Skipping ${from} (not in allowed senders)`);
-        return;
-      }
+    if (botNumbers.length > 0 && !botNumbers.includes(message.conversation.fromNumber)) {
+      console.log(`[webhook] Skipping message to ${message.conversation.fromNumber} (not this bot's number)`);
+      return;
+    }
 
-      // Skip messages from ignored senders
-      if (ignoredSenders.includes(from)) {
-        console.log(`[webhook] Skipping ${from} (ignored sender)`);
-        return;
-      }
+    if (allowedSenders.length > 0 && !allowedSenders.includes(message.from)) {
+      console.log(`[webhook] Skipping ${message.from} (not in allowed senders)`);
+      return;
+    }
 
-      const text = extractTextContent(message.parts);
-      const images = extractImageUrls(message.parts);
-      const audio = extractAudioUrls(message.parts);
-      const incomingEffect = message.effect;
-      const incomingReplyTo = message.reply_to;
+    if (ignoredSenders.includes(message.from)) {
+      console.log(`[webhook] Skipping ${message.from} (ignored sender)`);
+      return;
+    }
 
-      if (!text.trim() && images.length === 0 && audio.length === 0) {
-        console.log(`[webhook] Skipping empty message`);
-        return;
-      }
+    if (!message.text.trim() && message.images.length === 0 && message.audio.length === 0) {
+      console.log('[webhook] Skipping empty message');
+      return;
+    }
 
-      const effectInfo = incomingEffect ? ` [effect: ${incomingEffect.type}/${incomingEffect.name}]` : '';
-      const replyInfo = incomingReplyTo ? ` [reply to: ${incomingReplyTo.message_id.slice(0, 8)}...]` : '';
-      const mediaInfo = [
-        images.length > 0 ? `${images.length} image(s)` : '',
-        audio.length > 0 ? `${audio.length} audio` : '',
-      ].filter(Boolean).join(', ');
-      console.log(`[webhook] Message from ${from}: "${text.substring(0, 50)}..."${mediaInfo ? ` [${mediaInfo}]` : ''}${effectInfo}${replyInfo}`);
+    processedMessages.set(message.messageId, Date.now());
 
-      try {
-        await onMessage(chat_id, from, text, message.id, images, audio, incomingEffect, incomingReplyTo, service);
-      } catch (error) {
-        console.error(`[webhook] Error handling message:`, error);
-      }
+    const effectInfo = message.incomingEffect ? ` [effect: ${message.incomingEffect.type}/${message.incomingEffect.name}]` : '';
+    const mediaInfo = [
+      message.images.length > 0 ? `${message.images.length} image(s)` : '',
+      message.audio.length > 0 ? `${message.audio.length} audio` : '',
+    ].filter(Boolean).join(', ');
+    console.log(`[webhook] Message from ${message.from}: "${message.text.substring(0, 50)}..."${mediaInfo ? ` [${mediaInfo}]` : ''}${effectInfo}`);
+
+    try {
+      await onMessage(message);
+    } catch (error) {
+      console.error('[webhook] Error handling message:', error);
     }
   };
 }
