@@ -121,6 +121,7 @@ export interface NormalisedIncomingMessage {
   isGroupChat: boolean;
   participantNames: string[];
   chatName: string | null;
+  provider: 'sendblue' | 'linq';
   conversation: ConversationTarget;
 }
 
@@ -240,6 +241,7 @@ export function normaliseIncomingMessage(event: SendblueWebhookEvent): Normalise
     isGroupChat,
     participantNames: participants.length > 0 ? participants : [from, botNumber],
     chatName: event.group_display_name || null,
+    provider: 'sendblue',
     conversation: {
       chatId,
       fromNumber: botNumber,

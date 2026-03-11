@@ -195,7 +195,64 @@ async function insertSingleChunk(
   return !embErr;
 }
 
-// ── Check if source has changed (skip-if-unchanged) ─────────
+// ── Bulk-delete sources (one query per source type) ─────────
+
+export async function bulkDeleteSources(
+  supabase: SupabaseClient,
+  handle: string,
+  sourceType: string,
+  sourceIds: string[],
+): Promise<void> {
+  if (sourceIds.length === 0) return;
+
+  const { error } = await supabase
+    .from("search_documents")
+    .delete()
+    .eq("handle", handle)
+    .eq("source_type", sourceType)
+    .in("source_id", sourceIds);
+
+  if (error) {
+    console.warn(`[ingestion-helpers] bulkDeleteSources failed for ${sourceType} (${sourceIds.length} ids):`, error.message);
+  }
+}
+
+// ── Bulk check which sources need updating ──────────────────
+
+export async function bulkCheckNeedsUpdate(
+  supabase: SupabaseClient,
+  handle: string,
+  sourceType: string,
+  items: Array<{ sourceId: string; contentHash: string }>,
+): Promise<Set<string>> {
+  if (items.length === 0) return new Set();
+
+  const sourceIds = items.map((i) => i.sourceId);
+
+  const { data } = await supabase
+    .from("search_documents")
+    .select("source_id, content_hash")
+    .eq("handle", handle)
+    .eq("source_type", sourceType)
+    .in("source_id", sourceIds);
+
+  const existingHashes = new Map<string, string>();
+  for (const row of data ?? []) {
+    existingHashes.set(row.source_id, row.content_hash);
+  }
+
+  const needsUpdate = new Set<string>();
+  for (const item of items) {
+    const existing = existingHashes.get(item.sourceId);
+    if (!existing || existing !== item.contentHash) {
+      needsUpdate.add(item.sourceId);
+    }
+  }
+
+  return needsUpdate;
+}
+
+// ── Check if source has changed (single-item, used by memory/conversations) ─
 
 export async function sourceNeedsUpdate(
   supabase: SupabaseClient,

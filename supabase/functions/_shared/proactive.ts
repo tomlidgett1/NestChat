@@ -1,4 +1,4 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.39.0';
+import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
 import {
   type ProactiveEligibleUser,
   transitionOnboardState,
@@ -110,7 +110,7 @@ async function generateRecoveryNudge(user: ProactiveEligibleUser): Promise<strin
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 150,
       system: `You are Nest, a personal assistant people text. Never mention AI, bots, or technology. Generate a brief, warm recovery nudge for a user who opened a conversation but never got to value. Keep it to 1-2 short sentences. Be casual and low-pressure. Australian spelling.
 
@@ -151,7 +151,7 @@ async function generateMorningCheckin(user: ProactiveEligibleUser): Promise<stri
       : '';
 
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 100,
       system: `You are Nest, a personal assistant. Generate a brief morning check-in message. Keep it to 1 short sentence. Be warm but not over-the-top. Australian spelling. Never mention AI or bots.
 
@@ -221,7 +221,7 @@ async function generateMemoryMomentMessage(user: ProactiveEligibleUser, memory: 
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 100,
       system: `You are Nest, a personal assistant. Generate a brief, helpful follow-up message that references something you remember about the user. Keep it to 1-2 short sentences. Be warm and useful, not creepy. Australian spelling. Never mention AI or bots.
 

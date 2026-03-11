@@ -1,8 +1,9 @@
-import { chat, generateImage, getGroupChatAction, getTextForEffect } from './claude.ts';
+import { generateImage, getGroupChatAction, getTextForEffect } from './claude.ts';
+import { handleTurn } from './orchestrator/handle-turn.ts';
+import type { TurnInput, OnboardingContext } from './orchestrator/types.ts';
 import {
   logOutboundMessage,
   markWebhookEventStatus,
-  getUserProfile,
   addMessage,
   ensureNestUser,
   updateOnboardState,
@@ -13,21 +14,34 @@ import {
   assignExperiment,
   getUserExperiments,
   markProactiveReplied,
+  getUserTimezone,
 } from './state.ts';
 import type { WebhookEventRow } from './state.ts';
-import { sendMessage, sendReaction, startTyping } from './sendblue.ts';
-import type { NormalisedIncomingMessage } from './sendblue.ts';
-import { onboardChat } from './onboard.ts';
+import * as sendblueApi from './sendblue.ts';
+import * as linqApi from './linq.ts';
+import type { NormalisedIncomingMessage, Reaction, MessageEffect, MediaAttachment } from './sendblue.ts';
+import { MEMORY_V2_ENABLED } from './env.ts';
+import type { ValueWedge } from './state.ts';
 
+const _BOLD_UPPER: Record<string, string> = {};
+const _BOLD_LOWER: Record<string, string> = {};
+const _BOLD_DIGIT: Record<string, string> = {};
+for (let c = 65; c <= 90; c++) _BOLD_UPPER[String.fromCharCode(c)] = String.fromCodePoint(0x1D5D4 + (c - 65));
+for (let c = 97; c <= 122; c++) _BOLD_LOWER[String.fromCharCode(c)] = String.fromCodePoint(0x1D5EE + (c - 97));
+for (let c = 48; c <= 57; c++) _BOLD_DIGIT[String.fromCharCode(c)] = String.fromCodePoint(0x1D7EC + (c - 48));
+const _BOLD_MAP: Record<string, string> = { ..._BOLD_UPPER, ..._BOLD_LOWER, ..._BOLD_DIGIT };
+
+function toUnicodeBold(text: string): string {
+  return [...text].map(c => _BOLD_MAP[c] ?? c).join('');
+}
 
 function cleanResponse(text: string): string {
   return text
-    .replace(/\n\s*-\s*/g, ' - ')
-    .replace(/(?<!\w)_([^_]+)_(?!\w)/g, '$1')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/(?<!\w)\*([^*]+)\*(?!\w)/g, '$1')
+    .replace(/<cite[^>]*>|<\/cite>/g, '')
+    .replace(/\*\*(.+?)\*\*/g, (_m, p1) => toUnicodeBold(p1))
+    .replace(/\n[ \t]+\n/g, '\n\n')
+    .replace(/\n([,.:;!?])/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
-    .replace(/(?<!\n)\n(?!\n)/g, ' ')
     .replace(/  +/g, ' ')
     .trim();
 }
@@ -36,6 +50,175 @@ function fireAndForget(promise: Promise<unknown>): void {
   promise.catch((err) => console.warn('[pipeline] fire-and-forget error:', err));
 }
 
+// ─── Provider-aware wrappers ─────────────────────────────────────────────────
+
+async function pSendMessage(
+  msg: NormalisedIncomingMessage,
+  text: string,
+  effect?: MessageEffect,
+  media?: MediaAttachment[],
+): Promise<string | null> {
+  if (msg.provider === 'linq') {
+    const resp = await linqApi.sendMessage(msg.chatId, text, effect, media?.map((m) => ({ url: m.url })));
+    return resp.message?.id ?? null;
+  }
+  const resp = await sendblueApi.sendMessage(msg.conversation, text, effect, media);
+  return resp.message_handle ?? null;
+}
+
+async function pSendReaction(msg: NormalisedIncomingMessage, reaction: Reaction): Promise<void> {
+  if (msg.provider === 'linq') {
+    await linqApi.sendReaction(msg.messageId, reaction);
+  } else {
+    await sendblueApi.sendReaction(msg.messageId, msg.conversation.fromNumber, reaction);
+  }
+}
+
+async function pStartTyping(msg: NormalisedIncomingMessage): Promise<void> {
+  if (msg.provider === 'linq') {
+    await linqApi.startTyping(msg.chatId);
+  } else {
+    await sendblueApi.startTyping(msg.conversation);
+  }
+}
+
+// ─── Delivery: split bubbles, send reactions, effects, images ────────────────
+
+async function deliverResponse(
+  message: NormalisedIncomingMessage,
+  result: { text: string | null; reaction: Reaction | null; effect: MessageEffect | null; generatedImage: { url: string; prompt: string } | null },
+): Promise<void> {
+  // Send reaction
+  if (result.reaction) {
+    const display = result.reaction.type === 'custom'
+      ? (result.reaction as { type: 'custom'; emoji: string }).emoji
+      : result.reaction.type;
+    await pSendReaction(message, result.reaction);
+    fireAndForget(logOutboundMessage(message.chatId, 'reaction', { reaction: display, message_id: message.messageId }, 'sent', message.messageId));
+  }
+
+  // Generate effect text if no response text
+  let finalText = result.text;
+  if (!finalText && result.effect) {
+    finalText = await getTextForEffect(result.effect.name);
+  }
+
+  // Send text bubbles
+  if (finalText || result.generatedImage) {
+    const bubbles = finalText
+      ? finalText.split('---').map((part) => cleanResponse(part)).filter(Boolean)
+      : [];
+
+    for (let i = 0; i < bubbles.length; i++) {
+      if (i > 0) await new Promise((resolve) => setTimeout(resolve, 2000));
+      const isLast = i === bubbles.length - 1;
+      const messageEffect = isLast && !result.generatedImage ? result.effect ?? undefined : undefined;
+      const handle = await pSendMessage(message, bubbles[i], messageEffect);
+      fireAndForget(logOutboundMessage(
+        message.chatId,
+        'text',
+        { text: bubbles[i], effect: messageEffect ?? null },
+        'sent',
+        handle,
+      ));
+    }
+
+    // Send generated image
+    if (result.generatedImage) {
+      await pStartTyping(message);
+      const imageUrl = await generateImage(result.generatedImage.prompt);
+      if (imageUrl) {
+        const handle = await pSendMessage(message, '', result.effect ?? undefined, [{ url: imageUrl }]);
+        fireAndForget(addMessage(message.chatId, 'assistant', `[generated an image: ${result.generatedImage.prompt.substring(0, 50)}...]`));
+        fireAndForget(logOutboundMessage(
+          message.chatId,
+          'image',
+          { prompt: result.generatedImage.prompt, image_url: imageUrl },
+          'sent',
+          handle,
+        ));
+      } else {
+        const handle = await pSendMessage(message, 'sorry the image didnt work, try again?');
+        fireAndForget(logOutboundMessage(
+          message.chatId,
+          'text',
+          { text: 'sorry the image didnt work, try again?' },
+          'sent',
+          handle,
+        ));
+      }
+    }
+  }
+}
+
+// ─── Onboarding state machine events ─────────────────────────────────────────
+
+async function emitOnboardingEvents(
+  message: NormalisedIncomingMessage,
+  nestUser: Awaited<ReturnType<typeof ensureNestUser>>,
+  result: { rememberedUser: { name?: string; fact?: string; isForSender?: boolean } | null },
+): Promise<void> {
+  if (result.rememberedUser) {
+    if (result.rememberedUser.name) {
+      fireAndForget(setUserName(message.from, result.rememberedUser.name));
+    }
+    if (result.rememberedUser.fact) {
+      fireAndForget(addUserFact(message.from, result.rememberedUser.fact));
+    }
+
+    if (MEMORY_V2_ENABLED) {
+      import('./memory.ts').then(({ processRealtimeMemory }) => {
+        fireAndForget(processRealtimeMemory(
+          message.from,
+          result.rememberedUser!.fact || '',
+          result.rememberedUser!.name,
+          message.chatId,
+        ));
+      }).catch((err) => console.warn('[pipeline] onboard memory v2 failed:', err));
+    }
+
+    if (result.rememberedUser.name) {
+      fireAndForget(emitOnboardingEvent({
+        handle: message.from,
+        chatId: message.chatId,
+        eventType: 'new_user_name_captured',
+        messageTurnIndex: nestUser.onboardCount + 1,
+        currentState: nestUser.onboardState,
+      }));
+    }
+  }
+
+  if (nestUser.onboardCount >= 2 && !nestUser.secondEngagementAt) {
+    fireAndForget(transitionOnboardState({
+      handle: message.from,
+      newState: 'second_engagement_observed',
+      secondEngagement: true,
+    }));
+
+    fireAndForget(emitOnboardingEvent({
+      handle: message.from,
+      chatId: message.chatId,
+      eventType: 'second_engagement_observed',
+      messageTurnIndex: nestUser.onboardCount + 1,
+      currentState: 'second_engagement_observed',
+    }));
+  }
+}
+
+// ─── Wedge detection ─────────────────────────────────────────────────────────
+
+function detectWedgeFromMessage(msg: string): ValueWedge | null {
+  const lower = msg.toLowerCase();
+
+  if (/\b(remind|reminder|remember|nudge|follow.?up|track|don'?t forget|set.?a?.?timer|schedule|appointment|pickup|call)\b/.test(lower)) return 'offload';
+  if (/\b(write|draft|compose|help.?me.?(write|say|reply|respond)|message.?for|email.?to|text.?to|birthday.?message|thank.?you.?note)\b/.test(lower)) return 'draft';
+  if (/\b(too.?much|overwhelm|chaos|messy|sort|organis|prioriti|plan.?my|help.?me.?sort|million.?things|so.?much.?to.?do|stressed|swamped)\b/.test(lower)) return 'organise';
+
+  return null;
+}
+
+// ─── Pipeline ────────────────────────────────────────────────────────────────
+
 export async function processWebhookEvent(event: WebhookEventRow): Promise<void> {
   return processMessage(event.normalized_payload, event.id);
 }
@@ -43,155 +226,194 @@ export async function processWebhookEvent(event: WebhookEventRow): Promise<void>
 export async function processMessage(message: NormalisedIncomingMessage, eventId?: number): Promise<void> {
   if (eventId) fireAndForget(markWebhookEventStatus(eventId, 'processing'));
 
+  let authUserId: string | null = null;
+  let isOnboarding = false;
+  let onboardingContext: OnboardingContext | undefined;
+  let isProactiveReply = false;
+  let userTimezone: string | null = null;
+
   if (!message.isGroupChat) {
     const nestUser = await ensureNestUser(message.from, message.conversation.fromNumber);
+    authUserId = nestUser.authUserId ?? null;
+    userTimezone = nestUser.timezone ?? null;
+
+    if (!userTimezone) {
+      userTimezone = await getUserTimezone(message.from).catch(() => null);
+    }
 
     if (nestUser.status !== 'active') {
+      isOnboarding = true;
 
       const onboardUrl = `https://nest.expert/?token=${nestUser.onboardingToken}`;
       const isFirstMessage = nestUser.onboardCount === 0;
 
+      let experimentVariants: Record<string, string> = {};
+      if (isFirstMessage) {
+        const [nameVariant, promptVariant] = await Promise.all([
+          assignExperiment(message.from, 'name_first_vs_value_first', ['name_first', 'value_first']),
+          assignExperiment(message.from, 'open_vs_guided', ['open', 'guided']),
+        ]);
+        experimentVariants = {
+          name_first_vs_value_first: nameVariant,
+          open_vs_guided: promptVariant,
+        };
+
+        fireAndForget(emitOnboardingEvent({
+          handle: message.from,
+          chatId: message.chatId,
+          eventType: 'new_user_first_inbound_received',
+          messageTurnIndex: 1,
+          currentState: nestUser.onboardState,
+          experimentVariantIds: Object.values(experimentVariants),
+        }));
+
+        fireAndForget(transitionOnboardState({
+          handle: message.from,
+          newState: 'new_user_intro_started',
+        }));
+      } else {
+        experimentVariants = await getUserExperiments(message.from);
+
+        if (nestUser.lastProactiveSentAt) {
+          fireAndForget(markProactiveReplied(message.from));
+        }
+      }
+
+      // Build PDL context if available
+      let pdlContextStr: string | undefined;
+      if (nestUser.pdlProfile) {
+        try {
+          const { profileToContext } = await import('./pdl.ts');
+          pdlContextStr = profileToContext(nestUser.pdlProfile as any);
+        } catch (err) {
+          console.warn('[pipeline] PDL context build failed:', (err as Error).message);
+        }
+      }
+
+      onboardingContext = {
+        nestUser,
+        onboardUrl,
+        experimentVariants,
+        pdlContext: pdlContextStr,
+      };
+
       try {
-        let experimentVariants: Record<string, string> = {};
-        if (isFirstMessage) {
-          const [nameVariant, promptVariant] = await Promise.all([
-            assignExperiment(message.from, 'name_first_vs_value_first', ['name_first', 'value_first']),
-            assignExperiment(message.from, 'open_vs_guided', ['open', 'guided']),
-          ]);
-          experimentVariants = {
-            name_first_vs_value_first: nameVariant,
-            open_vs_guided: promptVariant,
-          };
+        // Entry state classification (second message only) — run before handleTurn so we can inject into context
+        const isSecondMessage = nestUser.onboardCount === 1;
+        if (isSecondMessage) {
+          try {
+            const { classifyEntryState } = await import('./classifier.ts');
+            const classification = await classifyEntryState(message.text, pdlContextStr);
+            if (classification) {
+              onboardingContext.classification = {
+                entryState: classification.entryState,
+                confidence: classification.confidence,
+                recommendedWedge: classification.recommendedWedge,
+                shouldAskName: classification.shouldAskName,
+                includeTrustReassurance: classification.includeTrustReassurance,
+                needsClarification: classification.needsClarification,
+                emotionalLoad: classification.emotionalLoad,
+              };
+              onboardingContext.detectedWedge = classification.recommendedWedge;
 
-          fireAndForget(emitOnboardingEvent({
-            handle: message.from,
-            chatId: message.chatId,
-            eventType: 'new_user_first_inbound_received',
-            messageTurnIndex: 1,
-            currentState: nestUser.onboardState,
-            experimentVariantIds: Object.values(experimentVariants),
-          }));
+              const turnIndex = nestUser.onboardCount + 1;
+              fireAndForget(emitOnboardingEvent({
+                handle: message.from,
+                chatId: message.chatId,
+                eventType: 'new_user_entry_state_classified',
+                messageTurnIndex: turnIndex,
+                entryState: classification.entryState,
+                valueWedge: classification.recommendedWedge,
+                currentState: 'new_user_intro_started',
+                confidenceScores: { classification: classification.confidence },
+              }));
 
-          fireAndForget(transitionOnboardState({
-            handle: message.from,
-            newState: 'new_user_intro_started',
-          }));
-        } else {
-          experimentVariants = await getUserExperiments(message.from);
+              fireAndForget(transitionOnboardState({
+                handle: message.from,
+                newState: 'first_value_pending',
+                entryState: classification.entryState,
+                firstValueWedge: classification.recommendedWedge,
+              }));
 
-          if (nestUser.lastProactiveSentAt) {
-            fireAndForget(markProactiveReplied(message.from));
+              if (classification.includeTrustReassurance) {
+                fireAndForget(emitOnboardingEvent({
+                  handle: message.from,
+                  chatId: message.chatId,
+                  eventType: 'trust_hesitation_detected',
+                  messageTurnIndex: turnIndex,
+                  entryState: classification.entryState,
+                  currentState: 'first_value_pending',
+                }));
+              }
+            }
+          } catch (err) {
+            console.warn('[pipeline] entry state classification failed:', (err as Error).message);
           }
         }
 
-        const { response, reaction, rememberedUser, pdlProfile, classification, detectedWedge } =
-          await onboardChat(nestUser, message.text, onboardUrl, experimentVariants);
+        const turnInput: TurnInput = {
+          chatId: message.chatId,
+          userMessage: message.text,
+          images: message.images,
+          audio: message.audio,
+          senderHandle: message.from,
+          isGroupChat: false,
+          participantNames: [],
+          chatName: null,
+          service: message.service,
+          incomingEffect: message.incomingEffect,
+          authUserId,
+          isOnboarding: true,
+          onboardingContext,
+          timezone: userTimezone,
+        };
 
-        if (rememberedUser) {
-          if (rememberedUser.name) fireAndForget(setUserName(message.from, rememberedUser.name));
-          if (rememberedUser.fact) fireAndForget(addUserFact(message.from, rememberedUser.fact));
-
-          if (rememberedUser.name) {
+        // Wedge detection for messages 3+
+        if (!isSecondMessage && nestUser.onboardCount >= 2) {
+          const detectedWedge = detectWedgeFromMessage(message.text);
+          if (detectedWedge) {
             fireAndForget(emitOnboardingEvent({
               handle: message.from,
               chatId: message.chatId,
-              eventType: 'new_user_name_captured',
+              eventType: 'new_user_first_value_wedge_selected',
               messageTurnIndex: nestUser.onboardCount + 1,
+              valueWedge: detectedWedge,
               currentState: nestUser.onboardState,
             }));
-          }
-        }
 
-        if (classification) {
-          const turnIndex = nestUser.onboardCount + 1;
-          fireAndForget(emitOnboardingEvent({
-            handle: message.from,
-            chatId: message.chatId,
-            eventType: 'new_user_entry_state_classified',
-            messageTurnIndex: turnIndex,
-            entryState: classification.entryState,
-            valueWedge: classification.recommendedWedge,
-            currentState: 'new_user_intro_started',
-            confidenceScores: { classification: classification.confidence },
-          }));
-
-          fireAndForget(transitionOnboardState({
-            handle: message.from,
-            newState: 'first_value_pending',
-            entryState: classification.entryState,
-            firstValueWedge: classification.recommendedWedge,
-          }));
-
-          if (classification.includeTrustReassurance) {
-            fireAndForget(emitOnboardingEvent({
+            fireAndForget(transitionOnboardState({
               handle: message.from,
-              chatId: message.chatId,
-              eventType: 'trust_hesitation_detected',
-              messageTurnIndex: turnIndex,
-              entryState: classification.entryState,
-              currentState: 'first_value_pending',
+              newState: 'first_value_delivered',
+              firstValueDelivered: true,
+              capabilityCategory: detectedWedge,
             }));
           }
         }
 
-        if (detectedWedge) {
-          fireAndForget(emitOnboardingEvent({
-            handle: message.from,
-            chatId: message.chatId,
-            eventType: 'new_user_first_value_wedge_selected',
-            messageTurnIndex: nestUser.onboardCount + 1,
-            valueWedge: detectedWedge,
-            currentState: nestUser.onboardState,
-          }));
+        const result = await handleTurn(turnInput);
 
-          fireAndForget(transitionOnboardState({
-            handle: message.from,
-            newState: 'first_value_delivered',
-            firstValueDelivered: true,
-            capabilityCategory: detectedWedge,
-          }));
-        }
+        // Onboarding state machine events
+        await emitOnboardingEvents(message, nestUser, result);
 
-        if (nestUser.onboardCount >= 2 && !nestUser.secondEngagementAt) {
-          fireAndForget(transitionOnboardState({
-            handle: message.from,
-            newState: 'second_engagement_observed',
-            secondEngagement: true,
-          }));
-
-          fireAndForget(emitOnboardingEvent({
-            handle: message.from,
-            chatId: message.chatId,
-            eventType: 'second_engagement_observed',
-            messageTurnIndex: nestUser.onboardCount + 1,
-            currentState: 'second_engagement_observed',
-          }));
-        }
-
-        if (reaction) {
-          await sendReaction(message.messageId, message.conversation.fromNumber, reaction);
-          fireAndForget(logOutboundMessage(message.chatId, 'reaction', { reaction: reaction.type, message_id: message.messageId }, 'sent', message.messageId));
-        }
-
-        const historyText = response.split('---').map((p) => p.trim()).filter(Boolean).join(' ');
+        // Update onboard state
+        const historyText = result.text
+          ? result.text.split('---').map((p) => p.trim()).filter(Boolean).join(' ')
+          : '';
         const updatedMessages = [
           ...nestUser.onboardMessages,
           { role: 'user', content: message.text },
           { role: 'assistant', content: historyText },
         ];
-        await updateOnboardState(message.from, updatedMessages, nestUser.onboardCount + 1, pdlProfile as Record<string, unknown> | null | undefined);
+        await updateOnboardState(message.from, updatedMessages, nestUser.onboardCount + 1);
 
-        const bubbles = response.split('---').map((part) => cleanResponse(part)).filter(Boolean);
-        for (let i = 0; i < bubbles.length; i++) {
-          if (i > 0) await new Promise((resolve) => setTimeout(resolve, 2000));
-          const sent = await sendMessage(message.conversation, bubbles[i]);
-          fireAndForget(logOutboundMessage(message.chatId, 'text', { text: bubbles[i] }, 'sent', sent.message_handle ?? null));
-        }
+        // Deliver response
+        await deliverResponse(message, result);
       } catch (e) {
         console.error('[pipeline] onboarding failed, sending fallback:', e instanceof Error ? e.message : e);
+        const onboardUrl = `https://nest.expert/?token=${nestUser.onboardingToken}`;
         const fallback = `Hey, I'm Nest. Quick verification and then we're off.\n${onboardUrl}`;
-        const sent = await sendMessage(message.conversation, fallback);
-        fireAndForget(logOutboundMessage(message.chatId, 'text', { text: fallback }, 'sent', sent.message_handle ?? null));
+        const handle = await pSendMessage(message, fallback);
+        fireAndForget(logOutboundMessage(message.chatId, 'text', { text: fallback }, 'sent', handle));
       }
 
       if (eventId) fireAndForget(markWebhookEventStatus(eventId, 'completed'));
@@ -199,16 +421,13 @@ export async function processMessage(message: NormalisedIncomingMessage, eventId
     }
 
     if (nestUser.lastProactiveSentAt) {
+      isProactiveReply = true;
       fireAndForget(markProactiveReplied(message.from));
     }
   }
 
-  const senderProfile = await getUserProfile(message.from);
-
-  const isGroupChat = message.isGroupChat;
-  const participantNames = message.participantNames;
-
-  if (isGroupChat && message.audio.length === 0 && message.images.length === 0) {
+  // ─── Group chat action classification ────────────────────────────────────
+  if (message.isGroupChat && message.audio.length === 0 && message.images.length === 0) {
     const { action, reaction: quickReaction } = await getGroupChatAction(message.text, message.from, message.chatId);
 
     if (action === 'ignore') {
@@ -217,11 +436,11 @@ export async function processMessage(message: NormalisedIncomingMessage, eventId
     }
 
     if (action === 'react' && quickReaction) {
-      await sendReaction(message.messageId, message.conversation.fromNumber, quickReaction);
+      await pSendReaction(message, quickReaction);
       await addMessage(message.chatId, 'user', message.text, message.from, {
-        isGroupChat,
+        isGroupChat: true,
         chatName: message.chatName,
-        participantNames,
+        participantNames: message.participantNames,
         service: message.service,
       });
       const reactionDisplay = quickReaction.type === 'custom' ? quickReaction.emoji : quickReaction.type;
@@ -232,83 +451,27 @@ export async function processMessage(message: NormalisedIncomingMessage, eventId
     }
   }
 
-  const { text: responseText, reaction, effect, rememberedUser, generatedImage } = await chat(
-    message.chatId,
-    message.text,
-    message.images,
-    message.audio,
-    {
-      isGroupChat,
-      participantNames,
-      chatName: message.chatName,
-      incomingEffect: message.incomingEffect,
-      senderHandle: message.from,
-      senderProfile,
-      service: message.service,
-    },
-  );
+  // ─── Active user flow — through the orchestrator ─────────────────────────
+  const turnInput: TurnInput = {
+    chatId: message.chatId,
+    userMessage: message.text,
+    images: message.images,
+    audio: message.audio,
+    senderHandle: message.from,
+    isGroupChat: message.isGroupChat,
+    participantNames: message.participantNames,
+    chatName: message.chatName,
+    service: message.service,
+    incomingEffect: message.incomingEffect,
+    authUserId,
+    isOnboarding: false,
+    isProactiveReply,
+    timezone: userTimezone,
+  };
 
-  if (reaction) {
-    const reactionDisplay = reaction.type === 'custom' ? reaction.emoji : reaction.type;
-    await sendReaction(message.messageId, message.conversation.fromNumber, reaction);
-    fireAndForget(logOutboundMessage(message.chatId, 'reaction', { reaction: reactionDisplay, message_id: message.messageId }, 'sent', message.messageId));
-  }
+  const result = await handleTurn(turnInput);
 
-  let finalText = responseText;
-  if (!finalText && effect) {
-    finalText = await getTextForEffect(effect.name);
-  }
-
-  if (!finalText && rememberedUser) {
-    console.log('[pipeline] remembered user without direct text response');
-  }
-
-  if (finalText || generatedImage) {
-    const messages = finalText ? finalText.split('---').map((part) => cleanResponse(part)).filter(Boolean) : [];
-
-    if (messages.length > 0) {
-      for (let index = 0; index < messages.length; index += 1) {
-        if (index > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-        const isLastMessage = index === messages.length - 1;
-        const messageEffect = isLastMessage && !generatedImage ? effect ?? undefined : undefined;
-        const response = await sendMessage(message.conversation, messages[index], messageEffect);
-        fireAndForget(logOutboundMessage(
-          message.chatId,
-          'text',
-          { text: messages[index], effect: messageEffect ?? null },
-          'sent',
-          response.message_handle ?? null,
-        ));
-      }
-    }
-
-    if (generatedImage) {
-      await startTyping(message.conversation);
-      const imageUrl = await generateImage(generatedImage.prompt);
-      if (imageUrl) {
-        const response = await sendMessage(message.conversation, '', effect ?? undefined, [{ url: imageUrl }]);
-        fireAndForget(addMessage(message.chatId, 'assistant', `[generated an image: ${generatedImage.prompt.substring(0, 50)}...]`));
-        fireAndForget(logOutboundMessage(
-          message.chatId,
-          'image',
-          { prompt: generatedImage.prompt, image_url: imageUrl },
-          'sent',
-          response.message_handle ?? null,
-        ));
-      } else {
-        const response = await sendMessage(message.conversation, 'sorry the image didnt work, try again?');
-        fireAndForget(logOutboundMessage(
-          message.chatId,
-          'text',
-          { text: 'sorry the image didnt work, try again?' },
-          'sent',
-          response.message_handle ?? null,
-        ));
-      }
-    }
-  }
+  await deliverResponse(message, result);
 
   if (eventId) fireAndForget(markWebhookEventStatus(eventId, 'completed'));
 }

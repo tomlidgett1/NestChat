@@ -12,6 +12,7 @@ create table if not exists public.user_profiles (
   handle text primary key,
   name text null,
   facts jsonb not null default '[]'::jsonb,
+  use_linq boolean not null default false,
   first_seen bigint not null,
   last_seen bigint not null
 );

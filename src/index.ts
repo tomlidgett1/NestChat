@@ -1,10 +1,11 @@
 import 'dotenv/config';
 import express from 'express';
-import { verifySupabaseSetup } from './lib/supabase.js';
+import { verifySupabaseSetup, getSupabase } from './lib/supabase.js';
 import { createWebhookHandler } from './webhook/handler.js';
 import { sendMessage, markAsRead, startTyping, sendReaction } from './sendblue/client.js';
 import { chat, getGroupChatAction, getTextForEffect, generateImage } from './claude-local-dev/client.js';
 import { getUserProfile, addMessage } from './state/conversation.js';
+import { debugDashboardHtml } from './debug/dashboard.js';
 
 // Clean up LLM response formatting quirks before sending
 function cleanResponse(text: string): string {
@@ -33,6 +34,58 @@ app.use(express.json());
 // Health check
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Debug dashboard
+app.get('/debug', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(debugDashboardHtml);
+});
+
+app.get('/debug/api/traces', async (req, res) => {
+  const limit = parseInt(req.query.limit as string) || 100;
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from('turn_traces')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.get('/debug/api/trace/:id', async (req, res) => {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from('turn_traces')
+    .select('*')
+    .eq('id', req.params.id)
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.get('/debug/api/thread/:chatId', async (req, res) => {
+  const limit = parseInt(req.query.limit as string) || 40;
+  const before = req.query.before as string | undefined;
+  const supabase = getSupabase();
+
+  let query = supabase
+    .from('conversation_messages')
+    .select('role, content, handle, metadata, created_at')
+    .eq('chat_id', req.params.chatId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (before) {
+    query = query.lt('created_at', before);
+  }
+
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json((data || []).reverse());
 });
 
 // Webhook endpoint for Sendblue
@@ -185,6 +238,7 @@ app.listen(PORT, () => {
 ║  Endpoints:                                           ║
 ║    POST /webhook  - Sendblue webhook receiver         ║
 ║    GET  /health   - Health check                      ║
+║    GET  /debug    - Decision tree inspector            ║
 ║                                                       ║
 ║  Next steps:                                          ║
 ║    1. Run: ngrok http ${PORT}                            ║

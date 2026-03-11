@@ -158,6 +158,8 @@ async function handleAddCallback(req: Request): Promise<Response> {
 
     console.log(`[manage-accounts] Linked Google ${profile.email} -> ${original_user_id} (${upsertData?.id})`);
 
+    await triggerIngestion(original_user_id);
+
     return jsonRes({
       success: true,
       account: {
@@ -264,6 +266,8 @@ async function handleAddMicrosoftCallback(req: Request): Promise<Response> {
 
     console.log(`[manage-accounts] Linked Microsoft ${email} -> ${original_user_id} (${upsertData?.id})`);
 
+    await triggerIngestion(original_user_id);
+
     return jsonRes({
       success: true,
       account: {
@@ -337,5 +341,44 @@ async function handleDelete(req: Request, userId: string): Promise<Response> {
   } catch (e) {
     console.error('[manage-accounts] delete error:', e);
     return jsonRes({ error: 'internal' }, 500);
+  }
+}
+
+// ── Fire-and-forget full ingestion on account connect ─────────
+
+async function triggerIngestion(authUserId: string): Promise<void> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+
+  console.log(`[manage-accounts] triggerIngestion called for ${authUserId}, url=${supabaseUrl ? 'set' : 'MISSING'}, key=${serviceRoleKey ? serviceRoleKey.slice(0, 20) + '...' : 'MISSING'}`);
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        auth_user_id: authUserId,
+        mode: 'full',
+        sources: ['emails', 'calendar'],
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const data = await resp.json().catch(() => ({}));
+    console.log(`[manage-accounts] Triggered ingestion for ${authUserId}: job=${data.job_id ?? 'none'}, status=${resp.status}`);
+  } catch (e) {
+    const msg = (e as Error).message ?? '';
+    if (msg.includes('abort')) {
+      console.log(`[manage-accounts] Ingestion request sent for ${authUserId} (timed out waiting for response — pipeline is running)`);
+    } else {
+      console.warn('[manage-accounts] triggerIngestion failed:', msg);
+    }
   }
 }

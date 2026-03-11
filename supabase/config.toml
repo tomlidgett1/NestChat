@@ -26,3 +26,15 @@ verify_jwt = false
 
 [functions.manage-google-accounts]
 verify_jwt = false
+
+[functions.linq-webhook]
+verify_jwt = false
+
+[functions.ingest-pipeline]
+verify_jwt = false
+
+[functions.ingest-cron]
+verify_jwt = false
+
+[functions.debug-dashboard]
+verify_jwt = false

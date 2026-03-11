@@ -1,4 +1,4 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.39.0';
+import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
 import {
   type MemoryItem,
   type MemoryType,
@@ -124,7 +124,7 @@ Reply with ONLY the category slug, nothing else.`;
 export async function classifyCategory(fact: string): Promise<string> {
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 20,
       system: CLASSIFY_CATEGORY_PROMPT,
       messages: [{ role: 'user', content: fact }],
@@ -230,7 +230,7 @@ export async function extractCandidateMemories(
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 1024,
       system: EXTRACTION_PROMPT,
       messages: [{ role: 'user', content: conversationText }],
@@ -420,7 +420,7 @@ Reply with EXACTLY one of:
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 50,
       messages: [{ role: 'user', content: prompt }],
     });

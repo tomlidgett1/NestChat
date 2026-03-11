@@ -17,9 +17,9 @@
 import { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getBatchEmbeddings, vectorString } from "./rag-tools.ts";
 
-const MAX_EVIDENCE_BLOCKS = 12;
-const MAX_EVIDENCE_CHARS = 1200;
-const MIN_SEMANTIC_SCORE = 0.28;
+const MAX_EVIDENCE_BLOCKS = 15;
+const MAX_EVIDENCE_CHARS = 2000;
+const MIN_SEMANTIC_SCORE = 0.22;
 
 // ── Source type display names ────────────────────────────────
 
@@ -285,8 +285,17 @@ function generateSubQueries(query: string): string[] {
     return !STOP_WORDS.has(lower) && !TEMPORAL_WORDS.has(lower) && lower.length > 1;
   });
 
+  const temporalWords = words.filter((w) => {
+    const lower = w.toLowerCase().replace(/[^\w]/g, "");
+    return TEMPORAL_WORDS.has(lower) || /^\d{4}$/.test(lower);
+  });
+
   if (keywords.length >= 2) {
     queries.push(keywords.join(" "));
+  }
+
+  if (temporalWords.length > 0 && keywords.length > 0) {
+    queries.push([...temporalWords, ...keywords].join(" "));
   }
 
   const topicWords = [...keywords].sort((a, b) => b.length - a.length).slice(0, 3);

@@ -1,5 +1,5 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-import Anthropic from 'npm:@anthropic-ai/sdk@0.39.0';
+import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
 import {
   getIdleConversationsNeedingSummary,
   getUnsummarisedMessages,
@@ -48,7 +48,7 @@ async function generateSummary(conversationText: string): Promise<SummaryOutput 
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 512,
       system: SUMMARY_PROMPT,
       messages: [{ role: 'user', content: truncated }],

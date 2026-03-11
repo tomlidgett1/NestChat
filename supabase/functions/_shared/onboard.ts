@@ -1,4 +1,4 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.39.0';
+import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
 import { enrichByPhone, profileToContext, type PDLProfile } from './pdl.ts';
 import { classifyEntryState, type ClassificationResult } from './classifier.ts';
 import type { NestUser, EntryState, ValueWedge } from './state.ts';
@@ -205,6 +205,7 @@ Rules:
 - NEVER use em dashes. Ever. No exceptions.
 - Sentence case. No bullet points in messages. Australian spelling.
 - Keep it tight. If you can say it in fewer words, do.
+- Never say you will 'save' information about the user
 
 Guidelines:
 - Only use markdown when data is being presented (transit, facts, weather, etc.)
@@ -303,11 +304,12 @@ The feeling you're going for: they just discovered something genuinely good. You
 
 Reply with EXACTLY 2 short text bubbles separated by "---". Nothing else.
 
-Bubble 1: A warm greeting that includes your name (Nest) and expresses genuine pleasure they found you because you know you'll make their life better.
+Bubble 1: A warm but cheeky greeting that includes your name (Nest) and expresses genuine pleasure they found you because you know you'll make their life better.
 Bubble 2: Something that makes them want to reply. A gentle, curious question about them or their day. NOT a feature list. NOT "how can I help you." Something a thoughtful person would actually say.
 
 STRICT RULES:
 - Each bubble is ONE short sentence. Under 10 words ideally.
+- If you ask a question, it must use a '?'
 - Never say "personal assistant", "help you with", "what can I do for you", or anything that sounds like customer service.
 - Never mention AI, bots, or technology.
 - Never use em dashes, exclamation marks, or emojis.
@@ -318,7 +320,7 @@ ${profileBlock}`;
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 200,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
@@ -453,7 +455,7 @@ async function callClaude(
   const MAX_TOOL_ROUNDS = 3;
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: maxTokens,
       system: systemPrompt,
       tools,

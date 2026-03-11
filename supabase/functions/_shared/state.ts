@@ -102,8 +102,17 @@ export interface UserProfile {
   handle: string;
   name: string | null;
   facts: string[];
+  useLinq: boolean;
   firstSeen: number;
   lastSeen: number;
+}
+
+export interface ConnectedAccount {
+  provider: 'google' | 'microsoft';
+  email: string;
+  name: string | null;
+  isPrimary: boolean;
+  scopes: string[];
 }
 
 export interface WebhookEventRow {
@@ -136,6 +145,7 @@ interface UserProfileRow {
   handle: string;
   name: string | null;
   facts: unknown;
+  use_linq: boolean;
   first_seen: number;
   last_seen: number;
 }
@@ -418,7 +428,7 @@ export async function getUserProfile(handle: string): Promise<UserProfile | null
   const supabase = getAdminClient();
   const { data, error } = await supabase
     .from(USER_PROFILES_TABLE)
-    .select('handle, name, facts, first_seen, last_seen')
+    .select('handle, name, facts, use_linq, first_seen, last_seen')
     .eq('handle', handle)
     .maybeSingle<UserProfileRow>();
 
@@ -435,9 +445,53 @@ export async function getUserProfile(handle: string): Promise<UserProfile | null
     handle: data.handle,
     name: data.name,
     facts: sanitiseFacts(data.facts),
+    useLinq: data.use_linq ?? false,
     firstSeen: data.first_seen,
     lastSeen: data.last_seen,
   };
+}
+
+export async function getConnectedAccounts(authUserId: string): Promise<ConnectedAccount[]> {
+  const supabase = getAdminClient();
+
+  const [googleResult, microsoftResult] = await Promise.all([
+    supabase
+      .from('user_google_accounts')
+      .select('google_email, google_name, is_primary, scopes')
+      .eq('user_id', authUserId),
+    supabase
+      .from('user_microsoft_accounts')
+      .select('microsoft_email, microsoft_name, is_primary')
+      .eq('user_id', authUserId),
+  ]);
+
+  const accounts: ConnectedAccount[] = [];
+
+  if (!googleResult.error && googleResult.data) {
+    for (const row of googleResult.data) {
+      accounts.push({
+        provider: 'google',
+        email: row.google_email,
+        name: row.google_name ?? null,
+        isPrimary: row.is_primary ?? false,
+        scopes: row.scopes ?? [],
+      });
+    }
+  }
+
+  if (!microsoftResult.error && microsoftResult.data) {
+    for (const row of microsoftResult.data) {
+      accounts.push({
+        provider: 'microsoft',
+        email: row.microsoft_email,
+        name: row.microsoft_name ?? null,
+        isPrimary: row.is_primary ?? false,
+        scopes: [],
+      });
+    }
+  }
+
+  return accounts;
 }
 
 export async function addUserFact(handle: string, fact: string): Promise<boolean> {
@@ -1011,6 +1065,28 @@ export async function updateOnboardState(
     console.error('[state] Error updating onboard state:', error.message);
     throw new Error(`updateOnboardState failed: ${error.message}`);
   }
+}
+
+export async function updateUserTimezone(handle: string, timezone: string): Promise<void> {
+  const supabase = getAdminClient();
+  const { error } = await supabase
+    .from(USER_PROFILES_TABLE)
+    .update({ timezone })
+    .eq('handle', handle);
+  if (error) {
+    console.warn('[state] Failed to update timezone:', error.message);
+  }
+}
+
+export async function getUserTimezone(handle: string): Promise<string | null> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase
+    .from(USER_PROFILES_TABLE)
+    .select('timezone')
+    .eq('handle', handle)
+    .maybeSingle();
+  if (error || !data) return null;
+  return (data as { timezone: string | null }).timezone ?? null;
 }
 
 export async function activateUser(token: string): Promise<string | null> {

@@ -1,4 +1,4 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.39.0';
+import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
 import type { EntryState, ValueWedge } from './state.ts';
 
 const client = new Anthropic({
@@ -55,7 +55,7 @@ export async function classifyEntryState(message: string, pdlContext?: string): 
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 200,
       system: CLASSIFIER_PROMPT,
       messages: [{ role: 'user', content: userContent }],
