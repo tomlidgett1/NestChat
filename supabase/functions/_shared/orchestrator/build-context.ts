@@ -1,5 +1,5 @@
-import type Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
-import type { TurnInput, TurnContext, MemoryItem, ConversationSummary, ToolTrace, StoredMessage } from './types.ts';
+import type { InputMessage, InputContentPart } from '../ai/models.ts';
+import type { TurnInput, TurnContext, ContextSubTimings, MemoryItem, ConversationSummary, ToolTrace, StoredMessage } from './types.ts';
 import { emptyWorkingMemory } from './types.ts';
 import { MEMORY_V2_ENABLED } from '../env.ts';
 
@@ -17,7 +17,7 @@ function formatToolNotes(metadata: Record<string, unknown> | undefined): string 
   return ' ' + tools.map((t) => `[${t.tool}]`).join(' ');
 }
 
-function formatHistoryForClaude(messages: StoredMessage[], isGroupChat: boolean): Anthropic.MessageParam[] {
+function formatHistory(messages: StoredMessage[], isGroupChat: boolean): InputMessage[] {
   return messages.map((message) => {
     const timeTag = formatRelativeTime(message.createdAt);
     const toolNotes = message.role === 'assistant' ? formatToolNotes(message.metadata) : '';
@@ -45,7 +45,7 @@ function formatHistoryForClaude(messages: StoredMessage[], isGroupChat: boolean)
 
 async function transcribeAudio(url: string): Promise<string | null> {
   try {
-    const OpenAI = (await import('npm:openai@6.16.0')).default;
+    const OpenAI = (await import('npm:openai@6.27.0')).default;
     const openai = new OpenAI({ apiKey: Deno.env.get('OPENAI_API_KEY') });
 
     const response = await fetch(url);
@@ -71,19 +71,19 @@ async function transcribeAudio(url: string): Promise<string | null> {
 // ═══════════════════════════════════════════════════════════════
 
 interface MessageContentResult {
-  messageContent: Anthropic.ContentBlockParam[];
+  messageContent: InputContentPart[];
   transcriptions: string[];
   transcriptionFailed: boolean;
   textToSend: string;
 }
 
 async function buildMessageContent(input: TurnInput): Promise<MessageContentResult> {
-  const messageContent: Anthropic.ContentBlockParam[] = [];
+  const messageContent: InputContentPart[] = [];
 
   for (const image of input.images) {
     messageContent.push({
-      type: 'image',
-      source: { type: 'url', url: image.url },
+      type: 'input_image',
+      image_url: image.url,
     });
   }
 
@@ -108,7 +108,7 @@ async function buildMessageContent(input: TurnInput): Promise<MessageContentResu
   }
 
   if (textToSend) {
-    messageContent.push({ type: 'text', text: textToSend });
+    messageContent.push({ type: 'input_text', text: textToSend });
   }
 
   return { messageContent, transcriptions, transcriptionFailed, textToSend };
@@ -121,22 +121,32 @@ async function buildMessageContent(input: TurnInput): Promise<MessageContentResu
 export interface RouterContext {
   recentTurns: Array<{ role: string; content: string }>;
   workingMemory: import('./types.ts').WorkingMemory;
+  pendingEmailSend: import('../state.ts').PendingEmailSendAction | null;
+  pendingEmailSends: import('../state.ts').PendingEmailSendAction[];
 }
 
 export async function buildRouterContext(input: TurnInput): Promise<RouterContext> {
-  const { getConversation } = await import('../state.ts');
+  const { getConversation, getLatestPendingEmailSend, getPendingEmailSends } = await import('../state.ts');
 
-  const [history, workingMemory] = await Promise.all([
+  const [history, workingMemory, pendingEmailSend, pendingEmailSends] = await Promise.all([
     getConversation(input.chatId, 6),
     loadWorkingMemory(input.chatId).then((wm) => wm ?? emptyWorkingMemory()),
+    getLatestPendingEmailSend(input.chatId),
+    getPendingEmailSends(input.chatId),
   ]);
 
-  const recentTurns = history.slice(-6).map((m) => ({
-    role: m.role,
-    content: m.content,
-  }));
+  const recentTurns = history.slice(-6).map((m) => {
+    let content = m.content;
+    if (m.role === 'assistant' && m.metadata) {
+      const tools = m.metadata.tools_used as Array<{ tool: string; detail?: string }> | undefined;
+      if (tools && tools.length > 0) {
+        content += ' ' + tools.map((t) => `[${t.tool}]`).join(' ');
+      }
+    }
+    return { role: m.role, content };
+  });
 
-  return { recentTurns, workingMemory };
+  return { recentTurns, workingMemory, pendingEmailSend, pendingEmailSends };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -144,63 +154,178 @@ export async function buildRouterContext(input: TurnInput): Promise<RouterContex
 // Accepts pre-fetched router context to avoid duplicate work
 // ═══════════════════════════════════════════════════════════════
 
+export interface ContextBuildResult extends TurnContext {
+  subTimings: ContextSubTimings;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Lightweight context builder — for casual / acknowledgement
+// messages where we skip RAG, memory, summaries, tool traces
+// ═══════════════════════════════════════════════════════════════
+
+export async function buildLightContext(
+  input: TurnInput,
+  routerCtx?: RouterContext,
+): Promise<ContextBuildResult> {
+  const {
+    getConversation,
+    getUserProfile,
+    getConnectedAccounts,
+    getLatestPendingEmailSend,
+    getPendingEmailSends,
+  } = await import('../state.ts');
+
+  const historyP = timed(() => getConversation(input.chatId));
+  const profileP = input.senderHandle
+    ? timed(() => getUserProfile(input.senderHandle))
+    : Promise.resolve({ result: null, ms: 0 });
+  const accountsP = input.authUserId
+    ? timed(() => getConnectedAccounts(input.authUserId!))
+    : Promise.resolve({ result: [] as import('../state.ts').ConnectedAccount[], ms: 0 });
+  const pendingEmailSendP = timed(() => getLatestPendingEmailSend(input.chatId));
+  const pendingEmailSendsP = timed(() => getPendingEmailSends(input.chatId));
+  const messageContentP = timed(() => buildMessageContent(input));
+
+  const [historyT, profileT, accountsT, pendingEmailSendT, pendingEmailSendsT, messageContentT] = await Promise.all([
+    historyP, profileP, accountsP, pendingEmailSendP, pendingEmailSendsP, messageContentP,
+  ]);
+
+  const history = historyT.result;
+  const { messageContent, transcriptions, transcriptionFailed, textToSend } = messageContentT.result;
+
+  const { addMessage } = await import('../state.ts');
+  if (textToSend) {
+    addMessage(input.chatId, 'user', textToSend, input.senderHandle, {
+      isGroupChat: input.isGroupChat,
+      chatName: input.chatName,
+      participantNames: input.participantNames,
+      service: input.service,
+    }).catch((err) => console.warn('[build-context] addMessage failed:', (err as Error).message));
+  }
+
+  const recentTurns = routerCtx?.recentTurns ?? history.slice(-6).map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+
+  const formattedHistory = formatHistory(history, input.isGroupChat);
+  const workingMemory = routerCtx?.workingMemory
+    ?? (await loadWorkingMemory(input.chatId)) ?? emptyWorkingMemory();
+
+  const subTimings: ContextSubTimings = {
+    historyMs: historyT.ms,
+    memoryMs: 0,
+    summariesMs: 0,
+    toolTracesMs: 0,
+    profileMs: profileT.ms,
+    accountsMs: accountsT.ms,
+    messageContentMs: messageContentT.ms,
+    ragMs: 0,
+    workingMemoryMs: 0,
+    formatHistoryMs: 0,
+  };
+
+  console.log(`[build-context] LIGHT path: history=${historyT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms`);
+
+  return {
+    history,
+    formattedHistory,
+    messageContent,
+    recentTurns,
+    memoryItems: [],
+    summaries: [],
+    toolTraces: [],
+    ragEvidence: '',
+    ragEvidenceBlockCount: 0,
+    senderProfile: profileT.result,
+    connectedAccounts: accountsT.result,
+    transcriptions,
+    transcriptionFailed,
+    workingMemory,
+    pendingEmailSend: routerCtx?.pendingEmailSend ?? pendingEmailSendT.result,
+    pendingEmailSends: routerCtx?.pendingEmailSends ?? pendingEmailSendsT.result,
+    subTimings,
+  };
+}
+
+function timed<T>(fn: () => Promise<T>): Promise<{ result: T; ms: number }> {
+  const s = Date.now();
+  return fn().then(result => ({ result, ms: Date.now() - s }));
+}
+
 export async function buildContext(
   input: TurnInput,
   routerCtx?: RouterContext,
-): Promise<TurnContext> {
+): Promise<ContextBuildResult> {
   const {
     getConversation,
     getConversationSummaries,
     getRecentToolTraces,
     getUserProfile,
     getConnectedAccounts,
+    getLatestPendingEmailSend,
+    getPendingEmailSends,
   } = await import('../state.ts');
 
-  const historyPromise = getConversation(input.chatId);
+  const historyP = timed(() => getConversation(input.chatId));
 
-  let memoryPromise: Promise<MemoryItem[]>;
+  let memoryP: Promise<{ result: MemoryItem[]; ms: number }>;
   if (MEMORY_V2_ENABLED && input.senderHandle) {
     const { getRelevantMemoryItems } = await import('../memory.ts');
-    memoryPromise = getRelevantMemoryItems(input.senderHandle, input.userMessage, 20);
+    memoryP = timed(() => getRelevantMemoryItems(input.senderHandle, input.userMessage, 20));
   } else {
-    memoryPromise = Promise.resolve([]);
+    memoryP = Promise.resolve({ result: [], ms: 0 });
   }
 
-  const summariesPromise = MEMORY_V2_ENABLED
-    ? getConversationSummaries(input.chatId, 10)
-    : Promise.resolve([]);
+  const summariesP = MEMORY_V2_ENABLED
+    ? timed(() => getConversationSummaries(input.chatId, 10))
+    : Promise.resolve({ result: [] as ConversationSummary[], ms: 0 });
 
-  const tracesPromise = MEMORY_V2_ENABLED
-    ? getRecentToolTraces(input.chatId, 10)
-    : Promise.resolve([]);
+  const tracesP = MEMORY_V2_ENABLED
+    ? timed(() => getRecentToolTraces(input.chatId, 10))
+    : Promise.resolve({ result: [] as ToolTrace[], ms: 0 });
 
-  const profilePromise = input.senderHandle
-    ? getUserProfile(input.senderHandle)
-    : Promise.resolve(null);
+  const profileP = input.senderHandle
+    ? timed(() => getUserProfile(input.senderHandle))
+    : Promise.resolve({ result: null, ms: 0 });
 
-  const accountsPromise = input.authUserId
-    ? getConnectedAccounts(input.authUserId)
-    : Promise.resolve([]);
+  const accountsP = input.authUserId
+    ? timed(() => getConnectedAccounts(input.authUserId!))
+    : Promise.resolve({ result: [] as import('../state.ts').ConnectedAccount[], ms: 0 });
+  const pendingEmailSendP = timed(() => getLatestPendingEmailSend(input.chatId));
+  const pendingEmailSendsP = timed(() => getPendingEmailSends(input.chatId));
 
-  const messageContentPromise = buildMessageContent(input);
+  const messageContentP = timed(() => buildMessageContent(input));
 
   const [
-    history,
-    memoryItems,
-    rawSummaries,
-    rawTraces,
-    senderProfile,
-    connectedAccounts,
-    { messageContent, transcriptions, transcriptionFailed, textToSend },
+    historyT,
+    memoryT,
+    summariesT,
+    tracesT,
+    profileT,
+    accountsT,
+    pendingEmailSendT,
+    pendingEmailSendsT,
+    messageContentT,
   ] = await Promise.all([
-    historyPromise,
-    memoryPromise,
-    summariesPromise,
-    tracesPromise,
-    profilePromise,
-    accountsPromise,
-    messageContentPromise,
+    historyP,
+    memoryP,
+    summariesP,
+    tracesP,
+    profileP,
+    accountsP,
+    pendingEmailSendP,
+    pendingEmailSendsP,
+    messageContentP,
   ]);
+
+  const history = historyT.result;
+  const memoryItems = memoryT.result;
+  const rawSummaries = summariesT.result;
+  const rawTraces = tracesT.result;
+  const senderProfile = profileT.result;
+  const connectedAccounts = accountsT.result;
+  const { messageContent, transcriptions, transcriptionFailed, textToSend } = messageContentT.result;
 
   let summaries: ConversationSummary[] = rawSummaries;
   let toolTraces: ToolTrace[] = rawTraces;
@@ -212,6 +337,7 @@ export async function buildContext(
   }
 
   // RAG retrieval
+  const ragStart = Date.now();
   let ragEvidence = '';
   let ragEvidenceBlockCount = 0;
   if (input.senderHandle) {
@@ -237,8 +363,9 @@ export async function buildContext(
       console.warn('[build-context] RAG retrieval failed:', (err as Error).message);
     }
   }
+  const ragMs = Date.now() - ragStart;
 
-  // Persist the user message (fire-and-forget — no need to block response)
+  // Persist the user message (fire-and-forget)
   const { addMessage } = await import('../state.ts');
   if (textToSend) {
     addMessage(input.chatId, 'user', textToSend, input.senderHandle, {
@@ -254,10 +381,29 @@ export async function buildContext(
     content: m.content,
   }));
 
-  const formattedHistory = formatHistoryForClaude(history, input.isGroupChat);
+  const fmtStart = Date.now();
+  const formattedHistory = formatHistory(history, input.isGroupChat);
+  const formatHistoryMs = Date.now() - fmtStart;
 
+  const wmStart = Date.now();
   const workingMemory = routerCtx?.workingMemory
     ?? (await loadWorkingMemory(input.chatId)) ?? emptyWorkingMemory();
+  const workingMemoryMs = Date.now() - wmStart;
+
+  const subTimings: ContextSubTimings = {
+    historyMs: historyT.ms,
+    memoryMs: memoryT.ms,
+    summariesMs: summariesT.ms,
+    toolTracesMs: tracesT.ms,
+    profileMs: profileT.ms,
+    accountsMs: accountsT.ms,
+    messageContentMs: messageContentT.ms,
+    ragMs,
+    workingMemoryMs,
+    formatHistoryMs,
+  };
+
+  console.log(`[build-context] sub-timings: history=${historyT.ms}ms memory=${memoryT.ms}ms summaries=${summariesT.ms}ms traces=${tracesT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms rag=${ragMs}ms wm=${workingMemoryMs}ms fmt=${formatHistoryMs}ms`);
 
   return {
     history,
@@ -274,5 +420,8 @@ export async function buildContext(
     transcriptions,
     transcriptionFailed,
     workingMemory,
+    pendingEmailSend: routerCtx?.pendingEmailSend ?? pendingEmailSendT.result,
+    pendingEmailSends: routerCtx?.pendingEmailSends ?? pendingEmailSendsT.result,
+    subTimings,
   };
 }

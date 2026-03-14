@@ -1,5 +1,6 @@
-import type Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
 import type { ToolNamespace, SideEffect } from '../orchestrator/types.ts';
+import type { OpenAITool } from '../ai/models.ts';
+import type { PendingEmailSendAction } from '../state.ts';
 
 // ═══════════════════════════════════════════════════════════════
 // Tool context — passed to every handler
@@ -9,6 +10,8 @@ export interface ToolContext {
   chatId: string;
   senderHandle: string;
   authUserId: string | null;
+  pendingEmailSend: PendingEmailSendAction | null;
+  pendingEmailSends: PendingEmailSendAction[];
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -31,30 +34,28 @@ export interface ToolContract {
   sideEffect: SideEffect;
   idempotent: boolean;
   timeoutMs: number;
-  inputSchema: Anthropic.Tool['input_schema'];
+  inputSchema: Record<string, unknown>;
   inputExamples?: Record<string, unknown>[];
   strict?: boolean;
   requiresConfirmation?: boolean;
   handler: (input: Record<string, unknown>, ctx: ToolContext) => Promise<ToolOutput>;
 }
 
-export function toAnthropicTool(contract: ToolContract): Anthropic.Tool {
+export function toOpenAITool(contract: ToolContract): OpenAITool {
   if (contract.name === 'web_search') {
-    return { type: 'web_search_20250305', name: 'web_search' } as unknown as Anthropic.Tool;
+    return { type: 'web_search_preview' };
   }
-  const tool: Record<string, unknown> = {
+  return {
+    type: 'function',
     name: contract.name,
     description: contract.description,
-    input_schema: contract.inputSchema,
+    parameters: contract.inputSchema,
+    strict: false,
   };
-  if (contract.inputExamples && contract.inputExamples.length > 0) {
-    tool.input_examples = contract.inputExamples;
-  }
-  return tool as unknown as Anthropic.Tool;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Pending tool call — extracted from Anthropic response
+// Pending tool call — extracted from OpenAI response
 // ═══════════════════════════════════════════════════════════════
 
 export interface PendingToolCall {

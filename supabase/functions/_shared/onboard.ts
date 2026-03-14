@@ -1,23 +1,22 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT, type OpenAITool, type FunctionCallOutput } from './ai/models.ts';
 import { enrichByPhone, profileToContext, type PDLProfile } from './pdl.ts';
 import { classifyEntryState, type ClassificationResult } from './classifier.ts';
 import type { NestUser, EntryState, ValueWedge } from './state.ts';
 import { getAdminClient } from './supabase.ts';
 import { USER_PROFILES_TABLE } from './env.ts';
 
-const client = new Anthropic({
-  apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
-});
+const client = getOpenAIClient();
 
 // ============================================================================
 // Tools — same as claude.ts so onboarding feels identical
 // ============================================================================
 
-const REACTION_TOOL: Anthropic.Tool = {
+const REACTION_TOOL: OpenAITool = {
+  type: 'function',
   name: 'send_reaction',
   description: 'Send an iMessage tapback reaction to the user\'s message. Only use standard tapbacks: love, like, dislike, laugh, emphasize, question.',
-  input_schema: {
-    type: 'object' as const,
+  parameters: {
+    type: 'object',
     properties: {
       type: {
         type: 'string',
@@ -26,24 +25,24 @@ const REACTION_TOOL: Anthropic.Tool = {
     },
     required: ['type'],
   },
+  strict: false,
 };
 
-const REMEMBER_USER_TOOL: Anthropic.Tool = {
+const REMEMBER_USER_TOOL: OpenAITool = {
+  type: 'function',
   name: 'remember_user',
   description: 'Save information about someone. Use when you learn their name, location, job, interests, or any personal info. You MUST also write a text response.',
-  input_schema: {
-    type: 'object' as const,
+  parameters: {
+    type: 'object',
     properties: {
       name: { type: 'string', description: 'Their first name if shared.' },
       fact: { type: 'string', description: 'A fact worth remembering about them.' },
     },
   },
+  strict: false,
 };
 
-const WEB_SEARCH_TOOL = {
-  type: 'web_search_20250305',
-  name: 'web_search',
-} as unknown as Anthropic.Tool;
+const WEB_SEARCH_TOOL: OpenAITool = { type: 'web_search_preview' };
 
 export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
 export type Reaction = { type: StandardReactionType };
@@ -319,16 +318,18 @@ STRICT RULES:
 ${profileBlock}`;
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 200,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.agent,
+      instructions: systemPrompt,
+      input: userMessage,
+      max_output_tokens: 2048,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.agent },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    if (text?.type === 'text' && text.text.trim()) {
-      return text.text.trim();
+    const text = response.output_text;
+    if (text && text.trim()) {
+      return text.trim();
     }
   } catch (err) {
     console.error('[onboard] First greeting generation failed:', err instanceof Error ? err.message : err);
@@ -358,7 +359,7 @@ export async function onboardChat(
     pdlContext = profileToContext(user.pdlProfile as unknown as PDLProfile);
   }
 
-  const history: Anthropic.MessageParam[] = user.onboardMessages
+  const history: Array<{ role: string; content: string }> = user.onboardMessages
     .filter((m) => m.content.trim())
     .map((m) => ({
       role: m.role as 'user' | 'assistant',
@@ -395,7 +396,7 @@ export async function onboardChat(
     classification = classResult;
 
     const systemPrompt = buildOnboardPrompt(messageCount, onboardUrl, classification, experimentVariants, pdlContext);
-    const result = await callClaude(systemPrompt, history, message, messageCount);
+    const result = await callLLM(systemPrompt, history, message, messageCount);
     return {
       ...result,
       classification,
@@ -407,7 +408,7 @@ export async function onboardChat(
   const detectedWedge = detectWedgeFromMessage(message);
 
   const systemPrompt = buildOnboardPrompt(messageCount, onboardUrl, null, experimentVariants, pdlContext);
-  const result = await callClaude(systemPrompt, history, message, messageCount);
+  const result = await callLLM(systemPrompt, history, message, messageCount);
   return {
     ...result,
     classification: null,
@@ -438,54 +439,68 @@ function detectWedgeFromMessage(message: string): ValueWedge | null {
 // Claude call with tool loop
 // ============================================================================
 
-async function callClaude(
+async function callLLM(
   systemPrompt: string,
-  history: Anthropic.MessageParam[],
+  history: Array<{ role: string; content: string }>,
   message: string,
   messageCount: number,
 ): Promise<OnboardResult> {
-  const maxTokens = messageCount <= 2 ? 500 : 400;
-  const tools: Anthropic.Tool[] = [REACTION_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL];
+  const maxTokens = messageCount <= 2 ? 4096 : 4096;
+  const tools: OpenAITool[] = [REACTION_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL];
 
   let reaction: Reaction | null = null;
   let rememberedUser: { name?: string; fact?: string } | null = null;
   const textParts: string[] = [];
-  const apiMessages: Anthropic.MessageParam[] = [...history, { role: 'user', content: message }];
+
+  const apiInput: Record<string, unknown>[] = [
+    ...history,
+    { role: 'user', content: message },
+  ];
 
   const MAX_TOOL_ROUNDS = 3;
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      tools,
-      messages: apiMessages,
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.agent,
+      instructions: systemPrompt,
+      input: apiInput as Parameters<typeof client.responses.create>[0]['input'],
+      tools: tools as Parameters<typeof client.responses.create>[0]['tools'],
+      max_output_tokens: maxTokens,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.agent },
+      include: ['reasoning.encrypted_content'],
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    const toolResults: FunctionCallOutput[] = [];
+    let hasFunctionCalls = false;
 
-    for (const block of response.content) {
-      if (block.type === 'text' && block.text.trim()) {
-        textParts.push(block.text.trim());
-      } else if (block.type === 'tool_use' && block.name === 'send_reaction') {
-        const input = block.input as { type: StandardReactionType };
-        reaction = { type: input.type };
-        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Reaction sent.' });
-      } else if (block.type === 'tool_use' && block.name === 'remember_user') {
-        const input = block.input as { name?: string; fact?: string };
-        rememberedUser = { name: input.name, fact: input.fact };
-        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Saved.' });
-      } else if (block.type === 'tool_use') {
-        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Done.' });
+    const roundText = (response.output_text ?? '').trim();
+    if (roundText) textParts.push(roundText);
+
+    for (const item of response.output) {
+      if (item.type === 'function_call') {
+        hasFunctionCalls = true;
+        const fc = item as unknown as { call_id: string; name: string; arguments: string };
+        let parsedArgs: Record<string, unknown> = {};
+        try { parsedArgs = JSON.parse(fc.arguments); } catch { /* empty */ }
+
+        if (fc.name === 'send_reaction') {
+          reaction = { type: parsedArgs.type as StandardReactionType };
+          toolResults.push({ type: 'function_call_output', call_id: fc.call_id, output: 'Reaction sent.' });
+        } else if (fc.name === 'remember_user') {
+          rememberedUser = { name: parsedArgs.name as string | undefined, fact: parsedArgs.fact as string | undefined };
+          toolResults.push({ type: 'function_call_output', call_id: fc.call_id, output: 'Saved.' });
+        } else {
+          toolResults.push({ type: 'function_call_output', call_id: fc.call_id, output: 'Done.' });
+        }
       }
     }
 
-    if (response.stop_reason !== 'tool_use' || toolResults.length === 0) {
+    if (!hasFunctionCalls || toolResults.length === 0) {
       break;
     }
 
-    apiMessages.push({ role: 'assistant', content: response.content });
-    apiMessages.push({ role: 'user', content: toolResults });
+    apiInput.push(...response.output as unknown as Record<string, unknown>[]);
+    apiInput.push(...toolResults);
   }
 
   const responseText = textParts.join('\n') || '';

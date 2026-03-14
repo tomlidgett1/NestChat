@@ -88,9 +88,12 @@ class EmbeddingCache {
   }
 }
 
-// ── 1. Casual Message Detection ──────────────────────────────
+// ── 1. Skip Detection ──
+// Two layers:
+//   a) Instant pattern match for obvious greetings/reactions (free, <1ms)
+//   b) LLM gate for everything else (~200-400ms, uses gpt-4.1-nano)
 
-const CASUAL_PATTERNS = new Set([
+const INSTANT_SKIP = new Set([
   "hey", "hi", "hello", "yo", "sup", "hiya", "g'day",
   "thanks", "thank you", "cheers", "ta", "thx",
   "ok", "okay", "k", "kk", "sure", "yep", "yup", "nah", "nope",
@@ -98,22 +101,63 @@ const CASUAL_PATTERNS = new Set([
   "gm", "gn", "morning", "night",
   "lol", "haha", "hahaha", "lmao", "nice", "cool", "great", "awesome",
   "bye", "cya", "see ya", "later", "ttyl",
-  "yes", "no", "yeah", "nah",
+  "yes", "no", "yeah", "nah", "na", "all good", "no worries",
   "how are you", "how's it going", "what's up", "whats up",
+  "send", "send it", "go ahead", "do it", "looks good", "perfect",
 ]);
 
-function isCasualMessage(msg: string): boolean {
-  const cleaned = msg.toLowerCase().replace(/[^\w\s']/g, "").trim();
-  if (CASUAL_PATTERNS.has(cleaned)) return true;
-  if (cleaned.split(/\s+/).length <= 2 && cleaned.length <= 12) {
-    const hasSubstance = ["meeting", "email", "note", "search", "find",
-      "draft", "schedule", "calendar", "transcript", "summary",
-      "remember", "memory", "remind"].some(
-      (k) => cleaned.includes(k)
-    );
-    if (!hasSubstance) return true;
+function isInstantSkip(msg: string): boolean {
+  return INSTANT_SKIP.has(msg.toLowerCase().replace(/[^\w\s']/g, "").trim());
+}
+
+const RAG_GATE_PROMPT = `You decide whether a user message needs retrieval from the user's personal knowledge base (emails, meeting notes, calendar, past conversations, saved memories).
+
+Return ONLY one word: "retrieve" or "skip".
+
+Return "retrieve" when the message:
+- Asks about something personal (their meetings, emails, notes, conversations, contacts, preferences, past events)
+- References a specific person, project, or topic they've discussed before
+- Is a follow-up to a previous question that was about personal data
+- Asks "what did I/we/they say", "what happened in that call", "remind me", etc.
+
+Return "skip" when the message:
+- Is casual chat, a greeting, reaction, or acknowledgement (e.g. "yeah interesting", "cool", "haha")
+- Is a general knowledge question answerable without personal data (e.g. "tell me about Japan", "how does solar work")
+- Is a web/current-events question (e.g. "what's the weather", "latest F1 results")
+- Is a tool-answerable request like "what's on my calendar" or "check my emails" (tools handle these directly)
+- Is a creative/drafting request that doesn't need past context
+
+When in doubt, return "retrieve". False skips are worse than unnecessary retrieval.`;
+
+async function shouldRetrieve(
+  message: string,
+  recentChat: Array<{ role: string; content: string }>,
+): Promise<boolean> {
+  const { getOpenAIClient } = await import("./ai/models.ts");
+  const client = getOpenAIClient();
+
+  const chatSnippet = recentChat.slice(-4).map((m) =>
+    `${m.role}: ${m.content.slice(0, 200)}`
+  ).join("\n");
+
+  try {
+    const res = await client.responses.create({
+      model: "gpt-4.1-nano",
+      instructions: RAG_GATE_PROMPT,
+      input: `Recent conversation:\n${chatSnippet}\n\nCurrent message: ${message}`,
+      max_output_tokens: 4,
+      temperature: 0,
+      store: false,
+    });
+
+    const answer = (res.output_text ?? "").trim().toLowerCase();
+    const skip = answer.startsWith("skip");
+    console.log(`[server-rag] LLM gate: "${message}" → ${skip ? "skip" : "retrieve"} (${answer})`);
+    return !skip;
+  } catch (err) {
+    console.warn(`[server-rag] LLM gate failed, defaulting to retrieve:`, (err as Error).message);
+    return true;
   }
-  return false;
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -131,9 +175,16 @@ export async function serverSideRAG(
 ): Promise<string> {
   const start = Date.now();
 
-  // 1. Casual message gate
-  if (isCasualMessage(message)) {
-    console.log(`[server-rag] Casual message detected, skipping pipeline (0ms)`);
+  // 1. Skip gate — two layers
+  if (isInstantSkip(message)) {
+    console.log(`[server-rag] Instant skip: "${message}" (0ms)`);
+    return "";
+  }
+
+  const needsRetrieval = await shouldRetrieve(message, recentChat);
+  if (!needsRetrieval) {
+    const gateMs = Date.now() - start;
+    console.log(`[server-rag] LLM gate skipped retrieval (${gateMs}ms)`);
     return "";
   }
 
@@ -396,7 +447,8 @@ async function keywordSourceSearchCached(
     "i prefer", "do i", "who is", "what's my", "favourite", "favorite",
     "preference", "remember"];
   const meetingKeywords = ["meeting", "meetings", "transcript", "discussed",
-    "call", "standup", "sync", "recap"];
+    "call", "standup", "sync", "recap", "granola", "action item", "decided",
+    "meeting notes", "what was said"];
   const calendarKeywords = ["calendar", "schedule", "event", "appointment",
     "busy", "free", "available"];
   const noteKeywords = ["note", "notes", "wrote down", "jotted"];

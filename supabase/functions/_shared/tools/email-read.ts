@@ -3,7 +3,7 @@ import type { ToolContract } from './types.ts';
 export const emailReadTool: ToolContract = {
   name: 'email_read',
   description:
-    "Read the user's email across all connected accounts (Gmail and Outlook). Use this tool whenever the user asks about their email, inbox, or a specific message. Supports two actions: 'search' to find emails matching a query, and 'get' to retrieve the full content of a specific email by its message ID. When searching, use Gmail search syntax (e.g. 'from:someone@example.com', 'subject:invoice', 'newer_than:7d', 'is:unread'). When getting a specific email, you must have the message_id from a previous search result. Do NOT use this tool to send, draft, or modify emails — use email_draft and email_send for that. Returns email metadata and content; use response_format to control verbosity.",
+    "Read the user's email across all connected accounts (Gmail and Outlook). Use this tool whenever the user asks about their email, inbox, or a specific message. Supports two actions: 'search' to find emails matching a query, and 'get' to retrieve the full content of a specific email by its message ID. When searching, use Gmail-style search syntax — it works for both Gmail and Outlook (queries are translated automatically). Examples: 'from:someone@example.com', 'subject:invoice', 'newer_than:7d', 'is:unread'. When getting a specific email, you must have the message_id from a previous search result. Do NOT use this tool to send, draft, or modify emails — use email_draft and email_send for that. Returns email metadata and content; use response_format to control verbosity.",
   namespace: 'email.read',
   sideEffect: 'read',
   idempotent: true,
@@ -18,7 +18,7 @@ export const emailReadTool: ToolContract = {
       },
       query: {
         type: 'string',
-        description: "Gmail search query (required when action is 'search'). Supports Gmail operators: from:, to:, subject:, newer_than:, older_than:, is:unread, has:attachment, label:, in:sent, etc.",
+        description: "Search query (required when action is 'search'). Use Gmail-style operators (works for both Gmail and Outlook): from:, to:, subject:, newer_than:, older_than:, is:unread, has:attachment, label:, in:sent, etc.",
       },
       message_id: {
         type: 'string',
@@ -53,7 +53,7 @@ export const emailReadTool: ToolContract = {
 
     try {
       if (action === 'search') {
-        if (!input.query) return { content: "Missing 'query' parameter. Provide a Gmail search query like 'from:name subject:topic newer_than:7d'." };
+        if (!input.query) return { content: "Missing 'query' parameter. Provide a search query like 'from:name subject:topic newer_than:7d'." };
         const { gmailSearchTool } = await import('../gmail-helpers.ts');
         const result = await gmailSearchTool(ctx.authUserId, {
           query: input.query,

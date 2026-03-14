@@ -14,6 +14,23 @@ const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const GRAPH_API = 'https://graph.microsoft.com/v1.0/me';
 const DEFAULT_TZ = 'Australia/Melbourne';
 
+// Test safety: only allow sends to this address, block writes from protected accounts
+const TEST_SAFE_RECIPIENT = Deno.env.get('TEST_SAFE_RECIPIENT') ?? null;
+const TEST_PROTECTED_ACCOUNTS = (Deno.env.get('TEST_PROTECTED_ACCOUNTS') ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+function enforceTestSafety(to: string[], fromAccount?: string): string | null {
+  if (!TEST_SAFE_RECIPIENT) return null;
+  const safeRecip = TEST_SAFE_RECIPIENT.toLowerCase();
+  const unsafeRecipients = to.filter(r => r.toLowerCase() !== safeRecip);
+  if (unsafeRecipients.length > 0) {
+    return `TEST SAFETY: blocked send to ${unsafeRecipients.join(', ')} — only ${TEST_SAFE_RECIPIENT} is allowed during testing`;
+  }
+  if (fromAccount && TEST_PROTECTED_ACCOUNTS.includes(fromAccount.toLowerCase())) {
+    return `TEST SAFETY: blocked write from protected account ${fromAccount}`;
+  }
+  return null;
+}
+
 // ══════════════════════════════════════════════════════════════
 // TOKEN RESOLUTION
 // ══════════════════════════════════════════════════════════════
@@ -37,8 +54,13 @@ export async function resolveToken(
     const result = await getGoogleAccessToken(userId, { email: accountEmail });
     return { accessToken: result.accessToken, email: result.email, provider: 'google' };
   }
-  const result = await getGoogleAccessToken(userId);
-  return { accessToken: result.accessToken, email: result.email, provider: 'google' };
+  try {
+    const result = await getGoogleAccessToken(userId);
+    return { accessToken: result.accessToken, email: result.email, provider: 'google' };
+  } catch {
+    const result = await getMicrosoftAccessToken(userId);
+    return { accessToken: result.accessToken, email: result.email, provider: 'microsoft' };
+  }
 }
 
 async function detectProvider(
@@ -73,7 +95,11 @@ export async function listGmailMessages(
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
 
-  if (!response.ok) return [];
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    console.error(`[gmail-helpers] listGmailMessages failed (${response.status}): ${detail.slice(0, 300)}`);
+    return [];
+  }
   const data = await response.json();
   return data.messages ?? [];
 }
@@ -233,8 +259,11 @@ export async function createGmailReplyDraft(
   threadId: string,
   body: string,
   _replyAll: boolean = false,
+  to?: string[],
+  subject?: string,
+  cc?: string[],
 ): Promise<{ draftId: string; threadId: string; status: string }> {
-  const raw = createRawReply(body);
+  const raw = createRawReply(body, to, subject, cc);
 
   const response = await fetch(`${GMAIL_API}/drafts`, {
     method: 'POST',
@@ -281,6 +310,79 @@ export async function sendGmailDraft(
 }
 
 // ══════════════════════════════════════════════════════════════
+// OUTLOOK — GMAIL QUERY TRANSLATION
+// ══════════════════════════════════════════════════════════════
+
+interface OutlookQueryParts {
+  search: string | null;
+  filter: string | null;
+}
+
+function gmailQueryToOutlook(gmailQuery: string): OutlookQueryParts {
+  let remaining = gmailQuery;
+  const filters: string[] = [];
+
+  const newerMatch = remaining.match(/newer_than:(\d+)([dhm])/i);
+  if (newerMatch) {
+    const val = parseInt(newerMatch[1], 10);
+    const unit = newerMatch[2].toLowerCase();
+    const ms = unit === 'd' ? val * 86400000 : unit === 'h' ? val * 3600000 : val * 60000;
+    const since = new Date(Date.now() - ms).toISOString();
+    filters.push(`receivedDateTime ge ${since}`);
+    remaining = remaining.replace(newerMatch[0], '');
+  }
+
+  const olderMatch = remaining.match(/older_than:(\d+)([dhm])/i);
+  if (olderMatch) {
+    const val = parseInt(olderMatch[1], 10);
+    const unit = olderMatch[2].toLowerCase();
+    const ms = unit === 'd' ? val * 86400000 : unit === 'h' ? val * 3600000 : val * 60000;
+    const before = new Date(Date.now() - ms).toISOString();
+    filters.push(`receivedDateTime le ${before}`);
+    remaining = remaining.replace(olderMatch[0], '');
+  }
+
+  const fromMatch = remaining.match(/from:(\S+)/i);
+  if (fromMatch) {
+    filters.push(`from/emailAddress/address eq '${fromMatch[1].replace(/'/g, "''")}'`);
+    remaining = remaining.replace(fromMatch[0], '');
+  }
+
+  const unreadMatch = remaining.match(/is:unread/i);
+  if (unreadMatch) {
+    filters.push('isRead eq false');
+    remaining = remaining.replace(unreadMatch[0], '');
+  }
+
+  const attachMatch = remaining.match(/has:attachment/i);
+  if (attachMatch) {
+    filters.push('hasAttachments eq true');
+    remaining = remaining.replace(attachMatch[0], '');
+  }
+
+  remaining = remaining.replace(/\b(in:(inbox|sent|drafts|trash|spam)|label:\S+|is:(starred|important|read))\b/gi, '');
+
+  const subjectMatch = remaining.match(/subject:(?:"([^"]+)"|(\S+))/i);
+  let searchText = '';
+  if (subjectMatch) {
+    searchText = subjectMatch[1] || subjectMatch[2];
+    remaining = remaining.replace(subjectMatch[0], '');
+  }
+
+  const leftover = remaining.replace(/[()]/g, '').trim();
+  if (leftover && !searchText) {
+    searchText = leftover;
+  } else if (leftover && searchText) {
+    searchText = `${searchText} ${leftover}`;
+  }
+
+  return {
+    search: searchText.trim() || null,
+    filter: filters.length > 0 ? filters.join(' and ') : null,
+  };
+}
+
+// ══════════════════════════════════════════════════════════════
 // OUTLOOK — SEARCH / READ
 // ══════════════════════════════════════════════════════════════
 
@@ -291,24 +393,55 @@ export async function searchOutlookMessages(
   maxResults: number,
   tz: string,
 ): Promise<any[]> {
+  const translated = gmailQueryToOutlook(query);
+  console.log(`[gmail-helpers] outlook query translation: "${query}" → search=${translated.search}, filter=${translated.filter}`);
+
   const params = new URLSearchParams({
-    $search: `"${query}"`,
     $top: String(maxResults),
-    $orderby: 'receivedDateTime desc',
     $select: 'id,conversationId,from,toRecipients,ccRecipients,subject,receivedDateTime,bodyPreview,body,hasAttachments',
   });
+
+  if (translated.search) {
+    params.set('$search', `"${translated.search}"`);
+  }
+  if (translated.filter) {
+    params.set('$filter', translated.filter);
+  }
+  if (!translated.search) {
+    params.set('$orderby', 'receivedDateTime desc');
+  }
 
   const resp = await fetch(
     `${GRAPH_API}/messages?${params}`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
   if (!resp.ok) {
-    console.warn(`[gmail-helpers] outlook search failed for ${accountEmail} (${resp.status})`);
+    const detail = await resp.text().catch(() => '');
+    console.warn(`[gmail-helpers] outlook search failed for ${accountEmail} (${resp.status}): ${detail.slice(0, 200)}`);
+    if (translated.filter && !translated.search) {
+      console.log(`[gmail-helpers] retrying outlook search without filter, using simple list`);
+      const fallbackParams = new URLSearchParams({
+        $top: String(maxResults),
+        $orderby: 'receivedDateTime desc',
+        $select: 'id,conversationId,from,toRecipients,ccRecipients,subject,receivedDateTime,bodyPreview,body,hasAttachments',
+      });
+      const fallbackResp = await fetch(
+        `${GRAPH_API}/messages?${fallbackParams}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      if (!fallbackResp.ok) return [];
+      const fallbackData = await fallbackResp.json();
+      return formatOutlookMessages(fallbackData.value ?? [], accountEmail, tz);
+    }
     return [];
   }
 
   const data = await resp.json();
-  return (data.value ?? []).map((m: any) => {
+  return formatOutlookMessages(data.value ?? [], accountEmail, tz);
+}
+
+function formatOutlookMessages(messages: any[], accountEmail: string, tz: string): any[] {
+  return messages.map((m: any) => {
     let dateLocal = m.receivedDateTime ?? '';
     try {
       const parsed = new Date(m.receivedDateTime);
@@ -495,6 +628,82 @@ export async function sendOutlookMessage(
 }
 
 // ══════════════════════════════════════════════════════════════
+// POST-SEND VERIFICATION
+// ══════════════════════════════════════════════════════════════
+
+export interface SendVerification {
+  verified: boolean;
+  messageId: string;
+  reason?: string;
+}
+
+export async function verifyGmailMessageSent(
+  accessToken: string,
+  messageId: string,
+): Promise<SendVerification> {
+  try {
+    const resp = await fetch(
+      `${GMAIL_API}/messages/${encodeURIComponent(messageId)}?format=metadata&metadataHeaders=To`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+
+    if (!resp.ok) {
+      return { verified: false, messageId, reason: `message lookup failed (${resp.status})` };
+    }
+
+    const data = await resp.json();
+    const labels: string[] = data.labelIds ?? [];
+
+    if (labels.includes('SENT')) {
+      return { verified: true, messageId };
+    }
+
+    return { verified: false, messageId, reason: `missing SENT label (labels: ${labels.join(',')})` };
+  } catch (err) {
+    return { verified: false, messageId, reason: `verification error: ${(err as Error).message}` };
+  }
+}
+
+export async function verifyOutlookMessageSent(
+  accessToken: string,
+  messageId: string,
+): Promise<SendVerification> {
+  try {
+    const resp = await fetch(
+      `${GRAPH_API}/mailFolders/sentitems/messages?$filter=id eq '${messageId}'&$select=id&$top=1`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.value?.length > 0) {
+        return { verified: true, messageId };
+      }
+    }
+
+    await new Promise(r => setTimeout(r, 1500));
+
+    const retry = await fetch(
+      `${GRAPH_API}/mailFolders/sentitems/messages?$filter=id eq '${messageId}'&$select=id&$top=1`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+
+    if (!retry.ok) {
+      return { verified: false, messageId, reason: `sent folder lookup failed (${retry.status})` };
+    }
+
+    const retryData = await retry.json();
+    if (retryData.value?.length > 0) {
+      return { verified: true, messageId };
+    }
+
+    return { verified: false, messageId, reason: 'message not found in sent folder after retry' };
+  } catch (err) {
+    return { verified: false, messageId, reason: `verification error: ${(err as Error).message}` };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 // HIGH-LEVEL TOOL IMPLEMENTATIONS
 // ══════════════════════════════════════════════════════════════
 
@@ -504,11 +713,38 @@ export async function gmailSearchTool(
 ): Promise<unknown> {
   const maxResults = Math.min((args.max_results as number) ?? 10, 20);
   const searchTz = (args.time_zone as string) ?? DEFAULT_TZ;
+  const targetAccount = (args.account as string)?.toLowerCase() ?? null;
 
-  const [googleAccounts, msAccounts] = await Promise.all([
-    getAllGoogleTokens(userId).catch(() => [] as TokenResult[]),
-    getAllMicrosoftTokens(userId).catch(() => [] as TokenResult[]),
-  ]);
+  let googleAccounts: TokenResult[] = [];
+  let msAccounts: TokenResult[] = [];
+
+  if (targetAccount) {
+    const provider = await detectProvider(userId, targetAccount);
+    if (provider === 'microsoft') {
+      try {
+        msAccounts = [await getMicrosoftAccessToken(userId, { email: targetAccount })];
+      } catch (e) {
+        console.error(`[gmail-helpers] Microsoft token failed for ${targetAccount}: ${(e as Error).message}`);
+      }
+    } else {
+      try {
+        googleAccounts = [await getGoogleAccessToken(userId, { email: targetAccount })];
+      } catch (e) {
+        console.error(`[gmail-helpers] Google token failed for ${targetAccount}: ${(e as Error).message}`);
+      }
+    }
+  } else {
+    [googleAccounts, msAccounts] = await Promise.all([
+      getAllGoogleTokens(userId).catch((e) => {
+        console.error(`[gmail-helpers] getAllGoogleTokens failed: ${(e as Error).message}`);
+        return [] as TokenResult[];
+      }),
+      getAllMicrosoftTokens(userId).catch((e) => {
+        console.error(`[gmail-helpers] getAllMicrosoftTokens failed: ${(e as Error).message}`);
+        return [] as TokenResult[];
+      }),
+    ]);
+  }
 
   const allAccounts = googleAccounts.length + msAccounts.length;
   const perAccountMax = Math.max(Math.ceil(maxResults / Math.max(allAccounts, 1)), 5);
@@ -572,6 +808,9 @@ export async function gmailSearchTool(
     .slice(0, maxResults);
 
   if (!allResults.length) {
+    if (allAccounts === 0) {
+      return { results: [], count: 0, message: 'No email accounts connected. The user may need to reconnect their email via the onboarding link.' };
+    }
     return { results: [], count: 0, message: 'No emails found matching that query.' };
   }
 
@@ -663,9 +902,18 @@ export async function sendDraftTool(
 
   const { accessToken, email: acctEmail, provider } = await resolveToken(userId, args.account as string | undefined);
 
+  const safetyBlock = enforceTestSafety(toRaw as string[], acctEmail);
+  if (safetyBlock) {
+    console.warn(`[gmail-helpers] ${safetyBlock}`);
+    return { error: safetyBlock };
+  }
+
   if (provider === 'microsoft') {
     return createOutlookDraft(accessToken, acctEmail, args);
   }
+
+  const toList = Array.isArray(args.to) ? args.to as string[] : [args.to as string];
+  const ccList = args.cc ? (Array.isArray(args.cc) ? args.cc as string[] : [args.cc as string]) : undefined;
 
   let result: any;
   if (args.reply_to_thread_id) {
@@ -675,6 +923,9 @@ export async function sendDraftTool(
         args.reply_to_thread_id as string,
         args.body as string,
         (args.reply_all as boolean) ?? false,
+        toList,
+        args.subject as string | undefined,
+        ccList,
       );
     } catch (e) {
       const msg = (e as Error).message ?? '';
@@ -682,10 +933,10 @@ export async function sendDraftTool(
         console.warn('[gmail-helpers] send_draft: reply thread not found, falling back to new draft');
         result = await createGmailDraft(
           accessToken,
-          Array.isArray(args.to) ? args.to : [args.to as string],
+          toList,
           args.subject as string,
           args.body as string,
-          args.cc ? (Array.isArray(args.cc) ? args.cc : [args.cc as string]) : undefined,
+          ccList,
           args.bcc ? (Array.isArray(args.bcc) ? args.bcc : [args.bcc as string]) : undefined,
         );
       } else {
@@ -695,10 +946,10 @@ export async function sendDraftTool(
   } else {
     result = await createGmailDraft(
       accessToken,
-      Array.isArray(args.to) ? args.to : [args.to as string],
+      toList,
       args.subject as string,
       args.body as string,
-      args.cc ? (Array.isArray(args.cc) ? args.cc : [args.cc as string]) : undefined,
+      ccList,
       args.bcc ? (Array.isArray(args.bcc) ? args.bcc : [args.bcc as string]) : undefined,
     );
   }
@@ -720,6 +971,15 @@ export async function sendEmailTool(
 ): Promise<unknown> {
   const { accessToken, provider } = await resolveToken(userId, args.account as string | undefined);
   const draftId = args.draft_id as string;
+
+  if (TEST_PROTECTED_ACCOUNTS.length > 0 && args.account) {
+    const acct = String(args.account).toLowerCase();
+    if (TEST_PROTECTED_ACCOUNTS.includes(acct)) {
+      const msg = `TEST SAFETY: blocked email_send from protected account ${acct}`;
+      console.warn(`[gmail-helpers] ${msg}`);
+      return { error: msg };
+    }
+  }
 
   if (!draftId) {
     throw new Error('draft_id is required. Create a draft with send_draft first.');
@@ -810,17 +1070,25 @@ function createRawEmail(
   return base64UrlEncode(headers.join('\r\n'));
 }
 
-function createRawReply(body: string): string {
+function createRawReply(
+  body: string,
+  to?: string[],
+  subject?: string,
+  cc?: string[],
+): string {
   const htmlBody = body.includes('<br') || body.includes('<p') || body.includes('<div')
     ? body
     : plainTextToHtml(body);
 
   const headers: string[] = [
     'MIME-Version: 1.0',
-    'Content-Type: text/html; charset=utf-8',
-    'Content-Transfer-Encoding: base64',
-    '',
   ];
+  if (to?.length) headers.push(`To: ${to.join(', ')}`);
+  if (cc?.length) headers.push(`Cc: ${cc.join(', ')}`);
+  if (subject) headers.push(`Subject: ${encodeMimeHeader(subject)}`);
+  headers.push('Content-Type: text/html; charset=utf-8');
+  headers.push('Content-Transfer-Encoding: base64');
+  headers.push('');
 
   const bodyBase64 = btoa(unescape(encodeURIComponent(htmlBody)));
   headers.push(bodyBase64);

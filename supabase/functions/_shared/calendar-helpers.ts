@@ -80,8 +80,13 @@ export async function resolveCalendarToken(userId: string, accountEmail?: string
     const result = await getGoogleAccessToken(userId, { email: accountEmail });
     return { accessToken: result.accessToken, email: result.email, provider: 'google' };
   }
-  const result = await getGoogleAccessToken(userId);
-  return { accessToken: result.accessToken, email: result.email, provider: 'google' };
+  try {
+    const result = await getGoogleAccessToken(userId);
+    return { accessToken: result.accessToken, email: result.email, provider: 'google' };
+  } catch {
+    const result = await getMicrosoftAccessToken(userId);
+    return { accessToken: result.accessToken, email: result.email, provider: 'microsoft' };
+  }
 }
 
 export async function getAllCalendarTokens(userId: string): Promise<Array<ResolvedCalendarToken & { isPrimary?: boolean }>> {
@@ -513,7 +518,11 @@ async function fetchGoogleEventsLive(accessToken: string, calendarId: string, ti
   const resp = await retryFetch(`${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?${params}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  if (!resp.ok) return [];
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    console.error(`[calendar-helpers] fetchGoogleEventsLive failed (${resp.status}): ${detail.slice(0, 300)}`);
+    return [];
+  }
   const data = await resp.json();
   return (data.items ?? []).filter((e: any) => e.status !== 'cancelled');
 }

@@ -40,6 +40,9 @@ Deno.serve(async (req) => {
   if (req.method === 'POST' && path === 'add-microsoft-callback') {
     return handleAddMicrosoftCallback(req);
   }
+  if (req.method === 'POST' && path === 'add-granola-callback') {
+    return handleAddGranolaCallback(req);
+  }
 
   const user = await authenticate(req);
   if (!user) return jsonRes({ error: 'unauthorised' }, 401);
@@ -53,24 +56,35 @@ Deno.serve(async (req) => {
 // ── List all accounts ──
 
 async function handleList(userId: string): Promise<Response> {
-  const { data, error } = await admin
-    .from('user_google_accounts')
-    .select('id, google_email, google_name, google_avatar_url, is_primary, scopes, created_at')
-    .eq('user_id', userId)
-    .order('is_primary', { ascending: false })
-    .order('created_at', { ascending: true });
+  const [googleResult, msResult, granolaResult] = await Promise.all([
+    admin
+      .from('user_google_accounts')
+      .select('id, google_email, google_name, google_avatar_url, is_primary, scopes, created_at')
+      .eq('user_id', userId)
+      .order('is_primary', { ascending: false })
+      .order('created_at', { ascending: true }),
+    admin
+      .from('user_microsoft_accounts')
+      .select('id, microsoft_email, microsoft_name, microsoft_avatar_url, is_primary, created_at')
+      .eq('user_id', userId)
+      .order('is_primary', { ascending: false })
+      .order('created_at', { ascending: true }),
+    admin
+      .from('user_granola_accounts')
+      .select('id, granola_email, granola_name, is_primary, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: true }),
+  ]);
 
-  const { data: msData, error: msError } = await admin
-    .from('user_microsoft_accounts')
-    .select('id, microsoft_email, microsoft_name, microsoft_avatar_url, is_primary, created_at')
-    .eq('user_id', userId)
-    .order('is_primary', { ascending: false })
-    .order('created_at', { ascending: true });
+  if (googleResult.error) return jsonRes({ error: googleResult.error.message }, 500);
+  if (msResult.error) console.error('[manage-accounts] Microsoft fetch error:', msResult.error.message);
+  if (granolaResult.error) console.error('[manage-accounts] Granola fetch error:', granolaResult.error.message);
 
-  if (error) return jsonRes({ error: error.message }, 500);
-  if (msError) console.error('[manage-accounts] Microsoft fetch error:', msError.message);
-
-  return jsonRes({ accounts: data ?? [], microsoft_accounts: msData ?? [] }, 200);
+  return jsonRes({
+    accounts: googleResult.data ?? [],
+    microsoft_accounts: msResult.data ?? [],
+    granola_accounts: granolaResult.data ?? [],
+  }, 200);
 }
 
 // ── Add Google account ──
@@ -282,6 +296,72 @@ async function handleAddMicrosoftCallback(req: Request): Promise<Response> {
   }
 }
 
+// ── Add Granola account ──
+
+async function handleAddGranolaCallback(req: Request): Promise<Response> {
+  try {
+    const { original_user_id, access_token, refresh_token, email, name } = await req.json();
+
+    if (!original_user_id || !access_token) {
+      return jsonRes({ error: 'missing fields' }, 400);
+    }
+
+    const { data: { user: originalUser }, error: userErr } = await admin.auth.admin.getUserById(original_user_id);
+    if (userErr || !originalUser) {
+      return jsonRes({ error: 'invalid user' }, 400);
+    }
+
+    const granolaEmail = email || originalUser.email || '';
+    if (!granolaEmail) {
+      return jsonRes({ error: 'no_email', hint: 'Could not determine Granola account email.' }, 400);
+    }
+
+    const { data: conflict } = await admin
+      .from('user_granola_accounts')
+      .select('user_id')
+      .eq('granola_email', granolaEmail)
+      .neq('user_id', original_user_id)
+      .maybeSingle();
+
+    if (conflict) {
+      return jsonRes({
+        error: 'email_conflict',
+        detail: 'This Granola account is already linked to a different Nest user.',
+      }, 409);
+    }
+
+    const { error: upsertErr } = await admin.from('user_granola_accounts').upsert(
+      {
+        user_id: original_user_id,
+        granola_email: granolaEmail,
+        granola_name: name ?? '',
+        access_token,
+        refresh_token: refresh_token ?? null,
+        is_primary: true,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,granola_email' },
+    );
+
+    if (upsertErr) return jsonRes({ error: upsertErr.message }, 500);
+
+    console.log(`[manage-accounts] Linked Granola ${granolaEmail} -> ${original_user_id}`);
+
+    await triggerGranolaIngestion(original_user_id);
+
+    return jsonRes({
+      success: true,
+      account: {
+        granola_email: granolaEmail,
+        granola_name: name ?? '',
+      },
+    }, 200);
+  } catch (e) {
+    console.error('[manage-accounts] add-granola-callback error:', e);
+    return jsonRes({ error: 'internal' }, 500);
+  }
+}
+
 // ── Delete account ──
 
 async function handleDelete(req: Request, userId: string): Promise<Response> {
@@ -289,7 +369,11 @@ async function handleDelete(req: Request, userId: string): Promise<Response> {
     const { account_id, provider } = await req.json();
     if (!account_id) return jsonRes({ error: 'missing account_id' }, 400);
 
-    const table = provider === 'microsoft' ? 'user_microsoft_accounts' : 'user_google_accounts';
+    const table = provider === 'granola'
+      ? 'user_granola_accounts'
+      : provider === 'microsoft'
+        ? 'user_microsoft_accounts'
+        : 'user_google_accounts';
 
     const { data: account } = await admin
       .from(table)
@@ -341,6 +425,43 @@ async function handleDelete(req: Request, userId: string): Promise<Response> {
   } catch (e) {
     console.error('[manage-accounts] delete error:', e);
     return jsonRes({ error: 'internal' }, 500);
+  }
+}
+
+// ── Fire-and-forget Granola ingestion on account connect ──────
+
+async function triggerGranolaIngestion(authUserId: string): Promise<void> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        auth_user_id: authUserId,
+        mode: 'full',
+        sources: ['granola'],
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const data = await resp.json().catch(() => ({}));
+    console.log(`[manage-accounts] Triggered Granola ingestion for ${authUserId}: job=${data.job_id ?? 'none'}, status=${resp.status}`);
+  } catch (e) {
+    const msg = (e as Error).message ?? '';
+    if (msg.includes('abort')) {
+      console.log(`[manage-accounts] Granola ingestion request sent for ${authUserId} (timed out waiting — pipeline is running)`);
+    } else {
+      console.warn('[manage-accounts] triggerGranolaIngestion failed:', msg);
+    }
   }
 }
 

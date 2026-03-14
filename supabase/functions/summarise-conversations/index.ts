@@ -1,5 +1,5 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from '../_shared/ai/models.ts';
 import {
   getIdleConversationsNeedingSummary,
   getUnsummarisedMessages,
@@ -12,9 +12,7 @@ import { embedChunks, type ChunkToEmbed } from '../_shared/embedder.ts';
 import { softDeleteSource, insertEmbeddedChunks } from '../_shared/ingestion-helpers.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
 
-const client = new Anthropic({
-  apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
-});
+const client = getOpenAIClient();
 
 const SUMMARY_PROMPT = `You are a memory extraction system for a messaging assistant called Nest. Given a conversation segment, produce a structured JSON summary.
 
@@ -47,20 +45,22 @@ async function generateSummary(conversationText: string): Promise<SummaryOutput 
     : conversationText;
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 512,
-      system: SUMMARY_PROMPT,
-      messages: [{ role: 'user', content: truncated }],
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.orchestration,
+      instructions: SUMMARY_PROMPT,
+      input: truncated,
+      max_output_tokens: 2048,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.orchestration },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    if (!text || text.type !== 'text') {
-      console.error('[summarise] No text block in response');
+    const text = response.output_text;
+    if (!text) {
+      console.error('[summarise] No text in response');
       return null;
     }
 
-    let rawText = text.text.trim();
+    let rawText = text.trim();
     const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch) {
       rawText = fenceMatch[1].trim();
@@ -68,7 +68,7 @@ async function generateSummary(conversationText: string): Promise<SummaryOutput 
 
     const parsed = JSON.parse(rawText);
     if (!parsed?.summary || typeof parsed.summary !== 'string') {
-      console.error('[summarise] Invalid JSON structure:', text.text.substring(0, 200));
+      console.error('[summarise] Invalid JSON structure:', rawText.substring(0, 200));
       return null;
     }
 

@@ -1,4 +1,4 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from './ai/models.ts';
 import {
   type MemoryItem,
   type MemoryType,
@@ -18,9 +18,7 @@ import { embedChunks, type ChunkToEmbed } from './embedder.ts';
 import { softDeleteSource, insertEmbeddedChunks } from './ingestion-helpers.ts';
 import { getAdminClient } from './supabase.ts';
 
-const client = new Anthropic({
-  apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
-});
+const client = getOpenAIClient();
 
 // ============================================================================
 // Types
@@ -123,17 +121,19 @@ Reply with ONLY the category slug, nothing else.`;
 
 export async function classifyCategory(fact: string): Promise<string> {
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 20,
-      system: CLASSIFY_CATEGORY_PROMPT,
-      messages: [{ role: 'user', content: fact }],
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.orchestration,
+      instructions: CLASSIFY_CATEGORY_PROMPT,
+      input: fact,
+      max_output_tokens: 256,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.orchestration },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    if (!text || text.type !== 'text') return CATEGORY_TAXONOMY.fallback;
+    const text = response.output_text;
+    if (!text) return CATEGORY_TAXONOMY.fallback;
 
-    return normaliseCategory(text.text);
+    return normaliseCategory(text);
   } catch (error) {
     console.error('[memory] Category classification error:', error);
     return CATEGORY_TAXONOMY.fallback;
@@ -229,17 +229,19 @@ export async function extractCandidateMemories(
   const messageIds = messages.map((m) => m.id);
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 1024,
-      system: EXTRACTION_PROMPT,
-      messages: [{ role: 'user', content: conversationText }],
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.orchestration,
+      instructions: EXTRACTION_PROMPT,
+      input: conversationText,
+      max_output_tokens: 1024,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.orchestration },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    if (!text || text.type !== 'text') return [];
+    const text = response.output_text;
+    if (!text) return [];
 
-    let rawText = text.text.trim();
+    let rawText = text.trim();
     const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch) {
       rawText = fenceMatch[1].trim();
@@ -419,20 +421,23 @@ Reply with EXACTLY one of:
 - REJECT — this is a duplicate, trivial, or should not be stored`;
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 50,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.orchestration,
+      instructions: 'You are a memory adjudication system. Respond with exactly one action line.',
+      input: prompt,
+      max_output_tokens: 256,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.orchestration },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    if (!text || text.type !== 'text') {
+    const text = response.output_text;
+    if (!text) {
       return isSingular && sameCategoryExisting.length > 0
         ? { type: 'SUPERSEDE_EXISTING', existingId: sameCategoryExisting[0].id }
         : { type: 'REJECT' };
     }
 
-    const answer = text.text.trim().toUpperCase();
+    const answer = text.trim().toUpperCase();
 
     if (answer.startsWith('ADD_NEW')) return { type: 'ADD_NEW' };
     if (answer.startsWith('MARK_UNCERTAIN')) return { type: 'MARK_UNCERTAIN' };

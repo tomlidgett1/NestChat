@@ -5,6 +5,13 @@ import { getConversation, addMessage, clearConversation, getUserProfile, setUser
 const client = new Anthropic();
 const openai = new OpenAI();
 
+const SEPARATOR_RE = /\n---\n|\n---$|^---\n|\s+---\s+|\s+---$|^---\s+/;
+function splitBubbles(text: string): string[] {
+  const hasSeparator = text.includes('---');
+  const parts = hasSeparator ? text.split(SEPARATOR_RE) : [text];
+  return parts.map(p => p.trim()).filter(Boolean);
+}
+
 const SYSTEM_PROMPT = `You are Nest, an AI assistant, accessible by text message as "Nest".
 
 Be upfront that you're Nest if asked.
@@ -65,6 +72,14 @@ Available commands (tell users about these if they ask):
 If someone asks how to use this, what commands are available, or how to make you forget something, tell them about the relevant commands.
 
 You can search the web for current information like weather, news, sports scores, etc. Use web search when you need up-to-date information.
+
+## Location & Travel
+You have travel_time and places_search tools.
+
+travel_time: "how long to get to X", "next bus/train to X", "can I drive there in 30 mins", walking/cycling/transit times. Use mode "transit" for bus/train/tram.
+places_search: "good coffee near X", "best restaurant in X", "phone number for X", "reviews of X". Use query for search, place_id for full details with reviews.
+
+Lead with the key answer (duration, next departure). For transit: include line name, departure time, stops, fare. For places: lead with name and rating, include address and open/closed status. Use **bold** for place names. If tools fail, use web_search as fallback.
 
 ## Reactions
 You can react to messages using iMessage reactions, but TEXT RESPONSES ARE PREFERRED.
@@ -247,6 +262,266 @@ const WEB_SEARCH_TOOL = {
   type: 'web_search_20250305',
   name: 'web_search',
 } as unknown as Anthropic.Tool;
+
+const TRAVEL_TIME_TOOL: Anthropic.Tool = {
+  name: 'travel_time',
+  description: 'Get travel time and directions between two locations. Supports driving, transit (bus, train, tram), walking, and bicycling. Use for "how long to get to X", "next bus/train to X", "can I drive there in 30 mins", walking times, and transit schedules.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      origin: { type: 'string', description: 'Starting location (address, place name, or landmark).' },
+      destination: { type: 'string', description: 'Destination location (address, place name, or landmark).' },
+      mode: { type: 'string', enum: ['driving', 'transit', 'walking', 'bicycling'], description: "Travel mode. Default 'driving'. Use 'transit' for public transport." },
+      departure_time: { type: 'string', description: "ISO 8601 datetime or 'now'. Default 'now'." },
+      arrival_time: { type: 'string', description: 'ISO 8601 datetime. Transit only.' },
+      transit_preference: { type: 'string', enum: ['less_walking', 'fewer_transfers'], description: 'Transit routing preference.' },
+      allowed_transit_modes: { type: 'array', items: { type: 'string', enum: ['BUS', 'SUBWAY', 'TRAIN', 'LIGHT_RAIL', 'RAIL'] }, description: 'Filter transit to specific vehicle types.' },
+    },
+    required: ['origin', 'destination'],
+  },
+};
+
+const PLACES_SEARCH_TOOL: Anthropic.Tool = {
+  name: 'places_search',
+  description: 'Search for places, restaurants, cafes, bars, attractions, and businesses. Get details like phone numbers, hours, ratings, and reviews. Provide a query for search, or a place_id for full details including reviews.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      query: { type: 'string', description: 'Search query (e.g. "best coffee in Melbourne CBD").' },
+      place_id: { type: 'string', description: 'Google Place ID from a previous search. Returns full details including reviews.' },
+      location: { type: 'string', description: 'Location bias (e.g. "Melbourne CBD"). Appended to query as "near <location>".' },
+      max_results: { type: 'number', description: 'Maximum results (1-10, default 5).' },
+    },
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+// Google Maps API handlers — Routes API v2 only (for local dev tool-use loop)
+// ═══════════════════════════════════════════════════════════════
+
+const ROUTES_API = 'https://routes.googleapis.com/directions/v2:computeRoutes';
+const PLACES_TEXT_SEARCH_API = 'https://places.googleapis.com/v1/places:searchText';
+const PLACES_DETAIL_API = 'https://places.googleapis.com/v1/places';
+const MAPS_FETCH_TIMEOUT_MS = 10_000;
+
+const TRANSIT_FIELD_MASK = [
+  'routes.legs.duration', 'routes.legs.steps.transitDetails',
+  'routes.legs.steps.startLocation', 'routes.legs.steps.endLocation',
+  'routes.legs.steps.travelMode', 'routes.legs.steps.localizedValues',
+  'routes.legs.steps.navigationInstruction', 'routes.legs.stepsOverview',
+  'routes.localizedValues', 'routes.travelAdvisory', 'routes.legs.localizedValues',
+].join(',');
+
+const DRIVE_FIELD_MASK = [
+  'routes.duration', 'routes.distanceMeters', 'routes.localizedValues',
+  'routes.legs.duration', 'routes.legs.distanceMeters', 'routes.legs.localizedValues',
+  'routes.legs.steps.navigationInstruction', 'routes.legs.steps.localizedValues',
+].join(',');
+
+const MODE_MAP: Record<string, string> = { driving: 'DRIVE', walking: 'WALK', bicycling: 'BICYCLE', transit: 'TRANSIT' };
+
+function mapsFetchWithTimeout(url: string, init?: RequestInit, timeoutMs = MAPS_FETCH_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
+async function mapsRetryFetch(url: string, init?: RequestInit, timeoutMs = MAPS_FETCH_TIMEOUT_MS): Promise<Response> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const resp = await mapsFetchWithTimeout(url, init, timeoutMs);
+      if (resp.ok || (resp.status >= 400 && resp.status < 500 && resp.status !== 429)) return resp;
+      if (attempt < 1) await new Promise(r => setTimeout(r, 1500));
+      else return resp;
+    } catch (e) {
+      if (attempt < 1) await new Promise(r => setTimeout(r, 1500));
+      else throw e;
+    }
+  }
+  throw new Error('mapsRetryFetch: should not reach here');
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseTransitRoutesV2(routes: any[], origin: string, destination: string): unknown {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const options = routes.slice(0, 3).map((route: any, idx: number) => {
+    const leg = route.legs?.[0];
+    if (!leg) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const option: any = {
+      option: idx + 1,
+      duration: route.localizedValues?.duration?.text ?? leg.localizedValues?.duration?.text,
+      duration_seconds: leg.duration ? parseInt(String(leg.duration).replace('s', ''), 10) : undefined,
+    };
+    const advisory = route.travelAdvisory;
+    if (advisory?.transitFare) {
+      const fare = advisory.transitFare;
+      option.fare = `${fare.currencyCode} ${(parseInt(fare.units ?? '0', 10) + (fare.nanos ?? 0) / 1e9).toFixed(2)}`;
+    }
+    if (route.localizedValues?.transitFare?.text) option.fare = route.localizedValues.transitFare.text;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const transitSteps = (leg.steps ?? []).filter((s: any) => s.travelMode === 'TRANSIT' || s.travelMode === 'WALK').slice(0, 10).map((s: any) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const step: any = { mode: s.travelMode === 'WALK' ? 'walking' : 'transit' };
+      if (s.localizedValues) { step.distance = s.localizedValues.distance?.text; step.duration = s.localizedValues.staticDuration?.text; }
+      if (s.navigationInstruction?.instructions) step.instruction = s.navigationInstruction.instructions;
+      if (s.transitDetails) {
+        const td = s.transitDetails;
+        const line = td.transitLine;
+        if (line) { step.line_name = line.nameShort || line.name; step.line_full_name = line.name; if (line.vehicle) { step.vehicle_type = line.vehicle.type?.toLowerCase(); } if (line.agencies?.length) step.agency = line.agencies[0].name; }
+        step.num_stops = td.stopCount;
+        if (td.stopDetails) {
+          step.departure_stop = td.stopDetails.departureStop?.name;
+          step.arrival_stop = td.stopDetails.arrivalStop?.name;
+          if (td.stopDetails.departureTime) step.departs_at = td.localizedValues?.departureTime?.time?.text ?? td.stopDetails.departureTime;
+          if (td.stopDetails.arrivalTime) step.arrives_at = td.localizedValues?.arrivalTime?.time?.text ?? td.stopDetails.arrivalTime;
+        }
+        if (td.headsign) step.direction = td.headsign;
+      }
+      return step;
+    });
+    if (transitSteps.length) option.legs = transitSteps;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const firstTransit = transitSteps.find((s: any) => s.mode === 'transit');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lastTransit = [...transitSteps].reverse().find((s: any) => s.mode === 'transit');
+    if (firstTransit?.departs_at) option.depart_at = firstTransit.departs_at;
+    if (lastTransit?.arrives_at) option.arrive_at = lastTransit.arrives_at;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const firstWalk = transitSteps.find((s: any) => s.mode === 'walking');
+    if (firstWalk) option.walk_to_station = { duration: firstWalk.duration, distance: firstWalk.distance };
+    return option;
+  }).filter(Boolean);
+  return { mode: 'transit', origin, destination, options };
+}
+
+async function executeTravelTime(input: Record<string, unknown>): Promise<string> {
+  const origin = input.origin as string;
+  const destination = input.destination as string;
+  if (!origin || !destination) return JSON.stringify({ error: "Both 'origin' and 'destination' are required." });
+
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  if (!apiKey) return JSON.stringify({ error: 'Google Maps not configured. Use web_search as fallback.', fallback_query: `travel time from ${origin} to ${destination}` });
+
+  const mode = (input.mode as string) ?? 'driving';
+  const travelMode = MODE_MAP[mode] ?? 'DRIVE';
+  const isTransit = travelMode === 'TRANSIT';
+  const departureTime = input.departure_time as string | undefined;
+  const arrivalTime = input.arrival_time as string | undefined;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body: any = { origin: { address: origin }, destination: { address: destination }, travelMode };
+
+    if (isTransit) {
+      body.computeAlternativeRoutes = true;
+      if (arrivalTime && arrivalTime !== 'now') body.arrivalTime = new Date(arrivalTime).toISOString();
+      else if (departureTime && departureTime !== 'now') { const d = new Date(departureTime); if (!isNaN(d.getTime()) && d.getTime() > Date.now()) body.departureTime = d.toISOString(); }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const prefs: any = {};
+      const tp = input.transit_preference as string | undefined;
+      if (tp === 'less_walking' || tp === 'LESS_WALKING') prefs.routingPreference = 'LESS_WALKING';
+      else if (tp === 'fewer_transfers' || tp === 'FEWER_TRANSFERS') prefs.routingPreference = 'FEWER_TRANSFERS';
+      const am = input.allowed_transit_modes as string[] | undefined;
+      if (am?.length) prefs.allowedTravelModes = am.map(m => m.toUpperCase());
+      if (Object.keys(prefs).length) body.transitPreferences = prefs;
+    } else if (travelMode === 'DRIVE') {
+      body.routingPreference = 'TRAFFIC_AWARE';
+      if (departureTime && departureTime !== 'now') { const d = new Date(departureTime); if (!isNaN(d.getTime()) && d.getTime() > Date.now()) body.departureTime = d.toISOString(); }
+    }
+
+    const fieldMask = isTransit ? TRANSIT_FIELD_MASK : DRIVE_FIELD_MASK;
+    console.log(`[travel_time] Routes API ${mode}: ${origin} → ${destination}`);
+    const resp = await mapsRetryFetch(ROUTES_API, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': fieldMask }, body: JSON.stringify(body) });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await resp.json();
+
+    if (data.error) return JSON.stringify({ error: data.error.message, fallback_query: `${origin} to ${destination} by ${mode}` });
+    if (!data.routes?.length) return JSON.stringify({ error: `No ${mode} routes found.`, fallback_query: `${origin} to ${destination} by ${mode}` });
+
+    if (isTransit) return JSON.stringify(parseTransitRoutesV2(data.routes, origin, destination));
+
+    // Non-transit: simple response
+    const route = data.routes[0];
+    const leg = route.legs?.[0];
+    const locValues = route.localizedValues ?? leg?.localizedValues;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result: any = { origin, destination, distance: locValues?.distance?.text, duration: locValues?.duration?.text, mode };
+    if (locValues?.staticDuration?.text && locValues.staticDuration.text !== locValues.duration?.text) result.duration_without_traffic = locValues.staticDuration.text;
+    const durationSec = route.duration ? parseInt(String(route.duration).replace('s', ''), 10) : undefined;
+    if (durationSec) result.duration_seconds = durationSec;
+    if (departureTime && departureTime !== 'now') {
+      result.departure_time = departureTime;
+      const depMs = new Date(departureTime).getTime();
+      if (!isNaN(depMs) && durationSec) result.estimated_arrival = new Date(depMs + durationSec * 1000).toISOString();
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const steps = (leg?.steps ?? []).slice(0, 5).map((s: any) => ({ instruction: s.navigationInstruction?.instructions, distance: s.localizedValues?.distance?.text, duration: s.localizedValues?.staticDuration?.text })).filter((s: any) => s.instruction);
+    if (steps.length) result.route_summary = steps;
+    return JSON.stringify(result);
+  } catch (e) {
+    return JSON.stringify({ error: (e as Error).message, fallback_query: `travel time from ${origin} to ${destination} by ${mode}` });
+  }
+}
+
+async function executePlacesSearch(input: Record<string, unknown>): Promise<string> {
+  const query = input.query as string | undefined;
+  const placeId = input.place_id as string | undefined;
+  if (!query && !placeId) return JSON.stringify({ error: "Provide 'query' or 'place_id'." });
+
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  if (!apiKey) return JSON.stringify({ error: 'Google Maps not configured. Use web_search as fallback.', fallback_query: query ?? `place ${placeId}` });
+
+  try {
+    if (placeId) {
+      const fieldMask = ['displayName', 'formattedAddress', 'rating', 'userRatingCount', 'priceLevel', 'types', 'websiteUri', 'nationalPhoneNumber', 'internationalPhoneNumber', 'currentOpeningHours', 'editorialSummary', 'reviews', 'googleMapsUri', 'adrFormatAddress'].join(',');
+      console.log(`[places_search] Detail: ${placeId}`);
+      const resp = await mapsFetchWithTimeout(`${PLACES_DETAIL_API}/${placeId}`, { headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': fieldMask } });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p: any = await resp.json();
+      if (p.error) return JSON.stringify({ error: p.error.message });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result: any = { name: p.displayName?.text, address: p.formattedAddress, google_maps_url: p.googleMapsUri };
+      if (p.rating) result.rating = `${p.rating}/5 (${p.userRatingCount ?? 0} reviews)`;
+      if (p.nationalPhoneNumber) result.phone = p.nationalPhoneNumber;
+      if (p.internationalPhoneNumber) result.international_phone = p.internationalPhoneNumber;
+      if (p.websiteUri) result.website = p.websiteUri;
+      if (p.editorialSummary?.text) result.summary = p.editorialSummary.text;
+      if (p.currentOpeningHours) { result.open_now = p.currentOpeningHours.openNow; if (p.currentOpeningHours.weekdayDescriptions?.length) result.hours = p.currentOpeningHours.weekdayDescriptions; }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (p.reviews?.length) result.top_reviews = p.reviews.slice(0, 3).map((r: any) => ({ rating: r.rating, text: r.text?.text?.slice(0, 200), time: r.relativePublishTimeDescription }));
+      return JSON.stringify(result);
+    }
+
+    // Text search
+    const maxResults = Math.min((input.max_results as number) ?? 5, 10);
+    const locationBias = input.location as string | undefined;
+    const textQuery = locationBias ? `${query} near ${locationBias}` : query!;
+    const fieldMask = ['places.displayName', 'places.formattedAddress', 'places.rating', 'places.userRatingCount', 'places.priceLevel', 'places.types', 'places.websiteUri', 'places.nationalPhoneNumber', 'places.currentOpeningHours', 'places.editorialSummary', 'places.googleMapsUri', 'places.id'].join(',');
+    console.log(`[places_search] Text search: "${textQuery}"`);
+    const resp = await mapsFetchWithTimeout(PLACES_TEXT_SEARCH_API, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': fieldMask }, body: JSON.stringify({ textQuery, maxResultCount: maxResults, languageCode: 'en' }) });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await resp.json();
+    if (data.error) return JSON.stringify({ error: data.error.message });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const places = (data.places ?? []).map((p: any) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const r: any = { name: p.displayName?.text, address: p.formattedAddress, place_id: p.id, google_maps_url: p.googleMapsUri };
+      if (p.rating) r.rating = `${p.rating}/5 (${p.userRatingCount ?? 0} reviews)`;
+      if (p.priceLevel) r.price_level = p.priceLevel;
+      if (p.nationalPhoneNumber) r.phone = p.nationalPhoneNumber;
+      if (p.websiteUri) r.website = p.websiteUri;
+      if (p.editorialSummary?.text) r.summary = p.editorialSummary.text;
+      if (p.currentOpeningHours?.openNow !== undefined) r.open_now = p.currentOpeningHours.openNow;
+      return r;
+    });
+    return JSON.stringify({ results: places, count: places.length });
+  } catch (e) {
+    return JSON.stringify({ error: (e as Error).message, fallback_query: query ?? `place ${placeId}` });
+  }
+}
+
+const MAPS_TOOLS = new Set(['travel_time', 'places_search']);
 
 export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
 export type ReactionType = StandardReactionType | 'custom';
@@ -474,24 +749,71 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
     const formattedHistory = formatHistoryForClaude(history, chatContext?.isGroupChat ?? false);
 
     // Build tools list
-    const tools: Anthropic.Tool[] = [REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL];
+    const tools: Anthropic.Tool[] = [REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, TRAVEL_TIME_TOOL, PLACES_SEARCH_TOOL];
 
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      system: buildSystemPrompt(chatContext),
-      tools,
-      messages: [...formattedHistory, { role: 'user', content: messageContent }],
-    });
+    // Tool-use loop: allows Claude to call maps tools, receive results, and format them
+    const messages: Anthropic.MessageParam[] = [...formattedHistory, { role: 'user', content: messageContent }];
+    const MAX_TOOL_ROUNDS = 3;
+    let finalResponse: Anthropic.Message | null = null;
 
-    // Extract text response and tool calls
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const response = await client.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: round === 0 ? 1024 : 2048,
+        system: buildSystemPrompt(chatContext),
+        tools,
+        messages,
+      });
+
+      // Check if any maps tools were called that need execution
+      const mapsToolUses = response.content.filter(
+        (b): b is Anthropic.ContentBlock & { type: 'tool_use' } =>
+          b.type === 'tool_use' && MAPS_TOOLS.has(b.name)
+      );
+
+      if (mapsToolUses.length === 0 || response.stop_reason !== 'tool_use') {
+        finalResponse = response;
+        break;
+      }
+
+      // Execute maps tools and build tool results
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const toolUse of response.content) {
+        if (toolUse.type !== 'tool_use') continue;
+
+        if (MAPS_TOOLS.has(toolUse.name)) {
+          const input = toolUse.input as Record<string, unknown>;
+          let result: string;
+          if (toolUse.name === 'travel_time') {
+            result = await executeTravelTime(input);
+          } else {
+            result = await executePlacesSearch(input);
+          }
+          console.log(`[claude] ${toolUse.name} result: ${result.substring(0, 100)}...`);
+          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: result });
+        } else {
+          // Non-maps tools get an "ok" acknowledgment so the loop can continue
+          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: 'ok' });
+        }
+      }
+
+      // Append assistant response + tool results for next round
+      messages.push({ role: 'assistant', content: response.content as Anthropic.ContentBlockParam[] });
+      messages.push({ role: 'user', content: toolResults });
+    }
+
+    if (!finalResponse) {
+      throw new Error('Tool-use loop exceeded max rounds');
+    }
+
+    // Extract text response and tool calls from final response
     const textParts: string[] = [];
     let reaction: Reaction | null = null;
     let effect: MessageEffect | null = null;
     let rememberedUser: { name?: string; fact?: string; isForSender?: boolean } | null = null;
     let generatedImage: { url: string; prompt: string } | null = null;
 
-    for (const block of response.content) {
+    for (const block of finalResponse.content) {
       if (block.type === 'text') {
         textParts.push(block.text);
       } else if (block.type === 'tool_use' && block.name === 'send_reaction') {
@@ -555,7 +877,7 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
     // Add assistant response to history (only text part, strip --- delimiters for cleaner context)
     // Note: image generation is handled separately in index.ts after sending text first
     if (textResponse) {
-      const historyMessage = textResponse.split('---').map(m => m.trim()).filter(m => m).join(' ');
+      const historyMessage = splitBubbles(textResponse).join(' ');
       await addMessage(chatId, 'assistant', historyMessage);
     } else if (effect) {
       // Save effect-only responses so Claude knows what it did (prevents effect loops)

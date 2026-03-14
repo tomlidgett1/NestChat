@@ -34,7 +34,7 @@ function section(name: string): void {
 section('Tool Contract Types');
 
 import type { ToolContract, ToolOutput, ToolContext, PendingToolCall, ToolExecutionResult } from '../tools/types.ts';
-import { toAnthropicTool } from '../tools/types.ts';
+import { toOpenAITool } from '../tools/types.ts';
 
 // Test: ToolContract with new fields
 const mockContract: ToolContract = {
@@ -55,12 +55,12 @@ assert(mockContract.inputExamples !== undefined, 'ToolContract has inputExamples
 assert(mockContract.strict === true, 'ToolContract has strict field');
 assert(mockContract.requiresConfirmation === false, 'ToolContract has requiresConfirmation field');
 
-// Test: toAnthropicTool includes input_examples
-const anthropicTool = toAnthropicTool(mockContract);
-assert(anthropicTool.name === 'test_tool', 'toAnthropicTool preserves name');
-assert((anthropicTool as any).input_examples !== undefined, 'toAnthropicTool includes input_examples');
+// Test: toOpenAITool returns function tool
+const openaiTool = toOpenAITool(mockContract);
+assert((openaiTool as any).name === 'test_tool', 'toOpenAITool preserves name');
+assert((openaiTool as any).type === 'function', 'toOpenAITool returns function type');
 
-// Test: toAnthropicTool for web_search returns native tool format
+// Test: toOpenAITool for web_search returns native tool format
 const webSearchContract: ToolContract = {
   name: 'web_search',
   description: 'Web search',
@@ -71,8 +71,8 @@ const webSearchContract: ToolContract = {
   inputSchema: { type: 'object', properties: {}, required: [] },
   handler: async () => ({ content: 'done' }),
 };
-const webTool = toAnthropicTool(webSearchContract);
-assert((webTool as any).type === 'web_search_20250305', 'web_search returns native tool type');
+const webTool = toOpenAITool(webSearchContract);
+assert((webTool as any).type === 'web_search_preview', 'web_search returns native tool type');
 
 // Test: ToolExecutionResult type
 const execResult: ToolExecutionResult = {
@@ -94,7 +94,7 @@ import { getTool, getAllTools, getToolNames } from '../tools/registry.ts';
 const allTools = getAllTools();
 const allNames = getToolNames();
 
-assert(allTools.length === 12, `Registry has 12 tools (got ${allTools.length})`);
+assert(allTools.length === 13, `Registry has 13 tools (got ${allTools.length})`);
 assert(allNames.includes('email_read'), 'email_read registered');
 assert(allNames.includes('email_draft'), 'email_draft registered');
 assert(allNames.includes('email_send'), 'email_send registered');
@@ -168,8 +168,8 @@ const emailSend = getTool('email_send')!;
 assert(emailSend.sideEffect === 'commit', 'email_send sideEffect is commit');
 assert(emailSend.requiresConfirmation === true, 'email_send requires confirmation');
 assert(
-  (emailSend.inputSchema as any).required?.includes('draft_id'),
-  'email_send requires draft_id'
+  !((emailSend.inputSchema as any).required?.includes('draft_id')),
+  'email_send can resolve draft_id from pending state'
 );
 
 const planSteps = getTool('plan_steps')!;
@@ -234,6 +234,8 @@ const mockCtx: ToolContext = {
   chatId: 'test-chat',
   senderHandle: '+61400000000',
   authUserId: null,
+  pendingEmailSend: null,
+  pendingEmailSends: [],
 };
 
 // email_read without auth
@@ -401,14 +403,14 @@ import { recallAgent } from '../agents/recall.ts';
 import { operatorAgent } from '../agents/operator.ts';
 import { onboardAgent } from '../agents/onboard.ts';
 
-assert(operatorAgent.model === 'claude-sonnet-4-6', 'operator uses Sonnet');
-assert(casualAgent.model === 'claude-haiku-4-5', 'casual uses Haiku');
-assert(productivityAgent.model === 'claude-sonnet-4-6', 'productivity uses Sonnet');
-assert(researchAgent.model === 'claude-haiku-4-5', 'research uses Haiku');
-assert(recallAgent.model === 'claude-haiku-4-5', 'recall uses Haiku');
-assert(onboardAgent.model === 'claude-haiku-4-5', 'onboard uses Haiku');
+assert(operatorAgent.modelTier === 'agent', 'operator uses agent tier');
+assert(casualAgent.modelTier === 'fast', 'casual uses fast tier');
+assert(productivityAgent.modelTier === 'agent', 'productivity uses agent tier');
+assert(researchAgent.modelTier === 'fast', 'research uses fast tier');
+assert(recallAgent.modelTier === 'fast', 'recall uses fast tier');
+assert(onboardAgent.modelTier === 'fast', 'onboard uses fast tier');
 
-assert(operatorAgent.maxTokens === 2048, 'operator has 2048 max tokens');
+assert(operatorAgent.maxOutputTokens === 16384, 'operator has 16384 max output tokens');
 assert(operatorAgent.toolPolicy.maxToolRounds === 8, 'operator has 8 max tool rounds');
 
 // Onboard agent has web.search and knowledge.search
@@ -547,20 +549,49 @@ const mockTrace = {
   turnId: 'test',
   chatId: 'test',
   senderHandle: '+61400000000',
+  timestamp: new Date().toISOString(),
+  userMessage: 'hi',
+  timezoneResolved: null,
   routeDecision: {} as any,
+  systemPromptLength: 0,
+  systemPromptHash: '',
   agentName: 'casual',
-  modelUsed: 'claude-haiku-4-5',
+  modelUsed: 'gpt-5-mini',
+  roundTraces: [],
+  promptComposeMs: 0,
+  toolFilterMs: 0,
   toolCalls: [],
   toolCallsBlocked: [],
+  toolCallCount: 0,
+  toolTotalLatencyMs: 0,
   agentLoopRounds: 1,
   contextBuildLatencyMs: 50,
+  contextSubTimings: null,
   agentLoopLatencyMs: 200,
+  inputTokens: 0,
+  outputTokens: 0,
+  responseText: 'Hello there!',
   totalLatencyMs: 250,
   responseLength: 42,
+  routerContextMs: 0,
+  contextPath: 'light',
+  pendingActionDebug: {
+    pendingEmailSendCount: 0,
+    pendingEmailSendId: null,
+    pendingEmailSendStatus: null,
+    draftIdPresent: false,
+    accountPresent: false,
+    confirmationResult: 'not_checked',
+  },
+  systemPrompt: null,
+  initialMessages: [],
+  availableToolNames: [],
   memoryItemsLoaded: 0,
   ragEvidenceBlocks: 0,
   summariesLoaded: 0,
-};
+  connectedAccountsCount: 0,
+  historyMessagesCount: 0,
+} as any;
 
 // Test: correct routing passes
 const correctResult: TurnResult = {
@@ -894,14 +925,11 @@ section('Calendar Routing Fast-Path');
 
 import { routeTurn } from '../orchestrator/route-turn.ts';
 
-const emptyContext: import('../orchestrator/types.ts').TurnContext = {
+const emptyContext: import('../orchestrator/build-context.ts').RouterContext = {
   recentTurns: [],
   workingMemory: emptyWorkingMemory(),
-  memories: [],
-  summaries: [],
-  toolTraces: [],
-  profile: null,
-  connectedAccounts: [],
+  pendingEmailSend: null,
+  pendingEmailSends: [],
 };
 
 const calendarMessages = [
@@ -941,8 +969,8 @@ section('Meeting Prep Agent');
 import { meetingPrepAgent } from '../agents/meeting-prep.ts';
 
 assert(meetingPrepAgent.name === 'meeting_prep', 'meeting_prep agent name');
-assert(meetingPrepAgent.model === 'claude-sonnet-4-6', 'meeting_prep uses sonnet');
-assert(meetingPrepAgent.maxTokens === 2048, 'meeting_prep has 2048 max tokens');
+assert(meetingPrepAgent.modelTier === 'agent', 'meeting_prep uses agent tier');
+assert(meetingPrepAgent.maxOutputTokens === 8192, 'meeting_prep has 8192 max output tokens');
 assert(meetingPrepAgent.toolPolicy.maxToolRounds === 8, 'meeting_prep has 8 tool rounds');
 
 const mpNamespaces = meetingPrepAgent.toolPolicy.allowedNamespaces;
@@ -952,7 +980,7 @@ assert(mpNamespaces.includes('knowledge.search'), 'meeting_prep has knowledge.se
 assert(mpNamespaces.includes('memory.read'), 'meeting_prep has memory.read');
 assert(mpNamespaces.includes('web.search'), 'meeting_prep has web.search');
 assert(!mpNamespaces.includes('calendar.write'), 'meeting_prep does NOT have calendar.write');
-assert(!mpNamespaces.includes('email.write'), 'meeting_prep does NOT have email.write');
+assert(mpNamespaces.includes('email.write'), 'meeting_prep has email.write');
 
 assert(meetingPrepAgent.instructions.includes('calendar_read'), 'meeting_prep instructions reference calendar_read');
 assert(meetingPrepAgent.instructions.includes('email_read'), 'meeting_prep instructions reference email_read');
@@ -1030,6 +1058,219 @@ for (const msg of nonPrepCalendarMessages) {
     decision.agent === 'productivity',
     `Non-prep calendar "${msg.substring(0, 35)}" still routes to productivity (got ${decision.agent})`
   );
+}
+
+section('Pending Email Send State');
+
+import {
+  createPendingEmailSend,
+  getLatestPendingEmailSend,
+  completePendingEmailSend,
+  cancelPendingEmailSends,
+} from '../state.ts';
+
+const pendingChatId = 'TEST#pending-email-send';
+await cancelPendingEmailSends(pendingChatId, 'test_reset');
+const pending = await createPendingEmailSend({
+  chatId: pendingChatId,
+  draftId: 'draft-test-123',
+  account: 'tom@lidgett.net',
+  to: ['tom@lidgett.net'],
+  subject: 'Pending action test',
+});
+assert(!!pending, 'createPendingEmailSend returns a record');
+assert(pending?.draftId === 'draft-test-123', 'pending email send stores draftId');
+assert(pending?.account === 'tom@lidgett.net', 'pending email send stores account');
+
+const latestPending = await getLatestPendingEmailSend(pendingChatId);
+assert(latestPending?.draftId === 'draft-test-123', 'getLatestPendingEmailSend returns latest pending draft');
+
+if (pending) {
+  await completePendingEmailSend(pending.id);
+}
+
+const completedPending = await getLatestPendingEmailSend(pendingChatId);
+assert(completedPending === null, 'completed pending email send is no longer active');
+
+section('Pending Confirmation Routing');
+
+const confirmContext: import('../orchestrator/build-context.ts').RouterContext = {
+  recentTurns: [{ role: 'assistant', content: 'here is the draft --- would you like me to send it?' }],
+  workingMemory: emptyWorkingMemory(),
+  pendingEmailSend: {
+    id: 1,
+    chatId: 'test',
+    actionType: 'email_send',
+    status: 'awaiting_confirmation',
+    draftId: 'draft-abc',
+    account: 'tom@lidgett.net',
+    to: ['tom@lidgett.net'],
+    subject: 'Test',
+    sourceTurnId: null,
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    completedAt: null,
+    failedAt: null,
+    failureReason: null,
+  },
+  pendingEmailSends: [{
+    id: 1,
+    chatId: 'test',
+    actionType: 'email_send',
+    status: 'awaiting_confirmation',
+    draftId: 'draft-abc',
+    account: 'tom@lidgett.net',
+    to: ['tom@lidgett.net'],
+    subject: 'Test',
+    sourceTurnId: null,
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    completedAt: null,
+    failedAt: null,
+    failureReason: null,
+  }],
+};
+
+const confirmInput: TurnInput = {
+  chatId: 'test', userMessage: 'Yep', images: [], audio: [],
+  senderHandle: '+61400000000', isGroupChat: false, participantNames: [],
+  chatName: null, authUserId: 'test-user', isOnboarding: false,
+};
+const confirmDecision = await routeTurn(confirmInput, confirmContext);
+assert(confirmDecision.agent === 'productivity', 'Yep routes to productivity when pending draft exists');
+
+const casualDecision = await routeTurn(confirmInput, emptyContext);
+assert(casualDecision.agent === 'casual', 'Yep routes to casual when no pending draft exists');
+
+// ═══════════════════════════════════════════════════════════════
+// Option A: Capability-based tool resolution
+// ═══════════════════════════════════════════════════════════════
+
+console.log('\n--- Option A: Capability Tools ---');
+
+const { resolveTools, resolveToolChoice, getBaseToolsForDomain, expandCapabilities } = await import('../orchestrator/capability-tools.ts');
+
+{
+  const emailResult = {
+    mode: 'smart' as const,
+    primaryDomain: 'email' as const,
+    confidence: 0.9,
+    requiredCapabilities: ['email.read' as const],
+    memoryDepth: 'none' as const,
+    requiresToolUse: true,
+    isConfirmation: false,
+    style: 'normal' as const,
+  };
+  const tools = resolveTools(emailResult);
+  assert(tools.includes('email.read'), 'email.read capability resolves to email.read namespace');
+  assert(tools.includes('messaging.react'), 'messaging.react always included');
+
+  const toolChoice = resolveToolChoice(emailResult);
+  assert(toolChoice === 'required', 'requiresToolUse=true gives tool_choice=required');
+}
+
+{
+  const chatResult = {
+    mode: 'chat' as const,
+    primaryDomain: 'general' as const,
+    confidence: 0.9,
+    requiredCapabilities: [] as const,
+    memoryDepth: 'none' as const,
+    requiresToolUse: false,
+    isConfirmation: false,
+    style: 'normal' as const,
+  };
+  const toolChoice = resolveToolChoice(chatResult);
+  assert(toolChoice === undefined, 'requiresToolUse=false gives tool_choice=undefined');
+}
+
+{
+  const lowConfResult = {
+    mode: 'smart' as const,
+    primaryDomain: 'email' as const,
+    confidence: 0.5,
+    requiredCapabilities: ['email.read' as const],
+    memoryDepth: 'none' as const,
+    requiresToolUse: true,
+    isConfirmation: false,
+    style: 'normal' as const,
+  };
+  const tools = resolveTools(lowConfResult);
+  assert(tools.includes('email.write'), 'low confidence broadens to include base domain tools');
+  assert(tools.includes('contacts.read'), 'low confidence broadens to include contacts.read from email base');
+}
+
+{
+  const writeResult = {
+    mode: 'smart' as const,
+    primaryDomain: 'email' as const,
+    confidence: 0.9,
+    requiredCapabilities: ['email.write' as const],
+    memoryDepth: 'none' as const,
+    requiresToolUse: false,
+    isConfirmation: false,
+    style: 'normal' as const,
+  };
+  const tools = resolveTools(writeResult);
+  assert(tools.includes('contacts.read'), 'compound verb fallback adds contacts.read for write capabilities');
+  assert(tools.includes('memory.read'), 'compound verb fallback adds memory.read for write capabilities');
+}
+
+{
+  const baseDomain = getBaseToolsForDomain('calendar');
+  assert(baseDomain.includes('calendar.read'), 'calendar base tools include calendar.read');
+  assert(baseDomain.includes('calendar.write'), 'calendar base tools include calendar.write');
+}
+
+{
+  const original = {
+    mode: 'smart' as const,
+    primaryDomain: 'email' as const,
+    secondaryDomains: ['calendar' as const],
+    confidence: 0.7,
+    requiredCapabilities: ['email.read' as const],
+    memoryDepth: 'none' as const,
+    requiresToolUse: true,
+    isConfirmation: false,
+    style: 'normal' as const,
+  };
+  const expanded = expandCapabilities(original, 'I need calendar access');
+  assert(expanded.requiredCapabilities.includes('calendar.read'), 'expandCapabilities adds secondary domain capabilities');
+  assert(expanded.confidence === 1.0, 'expandCapabilities sets confidence to 1.0');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Option A: Route-turn-v2 Layer 0B task signal detection
+// ═══════════════════════════════════════════════════════════════
+
+console.log('\n--- Option A: Route-turn-v2 ---');
+
+const { routeTurnV2 } = await import('../orchestrator/route-turn-v2.ts');
+
+{
+  const greetingInput: TurnInput = {
+    chatId: 'test-v2', userMessage: 'Hey!', images: [], audio: [],
+    senderHandle: '+61400000000', isGroupChat: false, participantNames: [],
+    chatName: null, authUserId: null, isOnboarding: false,
+  };
+  const greetingRoute = await routeTurnV2(greetingInput, emptyContext);
+  assert(greetingRoute.agent === 'chat', 'v2: greeting routes to chat agent');
+  assert(greetingRoute.routeLayer === '0B', 'v2: greeting uses Layer 0B');
+}
+
+{
+  const taskInput: TurnInput = {
+    chatId: 'test-v2', userMessage: "What's on my calendar today?", images: [], audio: [],
+    senderHandle: '+61400000000', isGroupChat: false, participantNames: [],
+    chatName: null, authUserId: null, isOnboarding: false,
+  };
+  const taskRoute = await routeTurnV2(taskInput, emptyContext);
+  assert(taskRoute.agent === 'smart', 'v2: calendar query routes to smart agent');
+  assert(taskRoute.routeLayer === '0C', 'v2: calendar query uses Layer 0C (classifier)');
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -6,11 +6,14 @@ import { generateImageTool } from './generate-image.ts';
 import { webSearchTool } from './web-search.ts';
 import { semanticSearchTool } from './semantic-search.ts';
 import { emailReadTool } from './email-read.ts';
-import { emailDraftTool, emailSendTool } from './email-write.ts';
+import { emailDraftTool, emailSendTool, emailUpdateDraftTool, emailCancelDraftTool } from './email-write.ts';
 import { planStepsTool } from './plan-steps.ts';
 import { calendarReadTool } from './calendar-read.ts';
 import { calendarWriteTool } from './calendar-write.ts';
 import { contactsReadTool } from './contacts-read.ts';
+import { granolaReadTool } from './granola-read.ts';
+import { travelTimeTool } from './travel-time.ts';
+import { placesSearchTool } from './places-search.ts';
 
 const REGISTRY = new Map<string, ToolContract>();
 
@@ -29,11 +32,16 @@ register(webSearchTool);
 register(semanticSearchTool);
 register(emailReadTool);
 register(emailDraftTool);
+register(emailUpdateDraftTool);
 register(emailSendTool);
+register(emailCancelDraftTool);
 register(planStepsTool);
 register(calendarReadTool);
 register(calendarWriteTool);
 register(contactsReadTool);
+register(granolaReadTool);
+register(travelTimeTool);
+register(placesSearchTool);
 
 export function getTool(name: string): ToolContract | undefined {
   return REGISTRY.get(name);

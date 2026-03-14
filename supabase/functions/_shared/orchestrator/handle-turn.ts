@@ -1,11 +1,13 @@
 import type { TurnInput, TurnResult, TurnTrace } from './types.ts';
-import { buildRouterContext, buildContext } from './build-context.ts';
+import { buildRouterContext, buildContext, buildLightContext } from './build-context.ts';
 import { routeTurn } from './route-turn.ts';
+import { routeTurnV2 } from './route-turn-v2.ts';
 import { selectAgent } from './select-agent.ts';
 import { runAgentLoop } from './run-agent-loop.ts';
 import { persistTurn } from './persist-turn.ts';
 import { extractWorkingMemory, persistWorkingMemory } from './working-memory.ts';
 import { queueBackgroundJob, shouldQueueBackgroundWork } from './background-jobs.ts';
+import { OPTION_A_ROUTING } from '../env.ts';
 
 // ═══════════════════════════════════════════════════════════════
 // Slash command handling (deterministic, no LLM needed)
@@ -40,10 +42,14 @@ async function handleSlashCommand(input: TurnInput): Promise<TurnResult | null> 
     connectedAccountsCount: 0,
     historyMessagesCount: 0,
     contextBuildLatencyMs: 0,
+    contextSubTimings: null,
     agentName: 'casual',
     modelUsed: 'none',
     agentLoopRounds: 0,
     agentLoopLatencyMs: 0,
+    roundTraces: [],
+    promptComposeMs: 0,
+    toolFilterMs: 0,
     toolCalls: [],
     toolCallsBlocked: [],
     toolCallCount: 0,
@@ -53,6 +59,16 @@ async function handleSlashCommand(input: TurnInput): Promise<TurnResult | null> 
     responseText: null,
     responseLength: 0,
     totalLatencyMs: 0,
+    routerContextMs: 0,
+    contextPath: 'light',
+    pendingActionDebug: {
+      pendingEmailSendCount: 0,
+      pendingEmailSendId: null,
+      pendingEmailSendStatus: null,
+      draftIdPresent: false,
+      accountPresent: false,
+      confirmationResult: 'not_checked',
+    },
     systemPrompt: null,
     initialMessages: null,
     availableToolNames: [],
@@ -165,26 +181,93 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
   const slashResult = await handleSlashCommand(input);
   if (slashResult) return slashResult;
 
-  // 2. Fetch lightweight router context (history + working memory)
+  // 2. Route the message
+  let routerCtx: import('./build-context.ts').RouterContext | undefined;
+  let routerContextMs = 0;
+  let route: import('./types.ts').RouteDecision;
+  let routeMs = 0;
+
+  if (OPTION_A_ROUTING) {
+    // Option A: v2 routing (classifier-based, 2-agent model)
+    const routerCtxStart = Date.now();
+    routerCtx = await buildRouterContext(input);
+    routerContextMs = Date.now() - routerCtxStart;
+
+    const routeStart = Date.now();
+    route = await routeTurnV2(input, routerCtx);
+    routeMs = Date.now() - routeStart;
+  } else {
+    // Legacy: try instant fast-path BEFORE fetching any context
+    const { tryInstantCasual } = await import('./route-turn.ts');
+    const instantRoute = tryInstantCasual(input);
+
+    if (instantRoute) {
+      route = instantRoute;
+      routeMs = 0;
+    } else {
+      const routerCtxStart = Date.now();
+      routerCtx = await buildRouterContext(input);
+      routerContextMs = Date.now() - routerCtxStart;
+
+      const routeStart = Date.now();
+      route = await routeTurn(input, routerCtx);
+      routeMs = Date.now() - routeStart;
+    }
+  }
+
+  // 3. Build context — select path based on memoryDepth (v2) or heuristics (legacy)
   const contextStart = Date.now();
-  const routerCtx = await buildRouterContext(input);
+  let useLightContext: boolean;
+  let contextPath: 'full' | 'light' | 'memory-light';
 
-  // 3. Route + full context build in parallel
-  const [route, context] = await Promise.all([
-    routeTurn(input, routerCtx),
-    buildContext(input, routerCtx),
-  ]);
+  if (OPTION_A_ROUTING && route.memoryDepth !== undefined) {
+    if (route.memoryDepth === 'none') {
+      useLightContext = true;
+      contextPath = 'light';
+    } else if (route.memoryDepth === 'light') {
+      useLightContext = true;
+      contextPath = 'memory-light';
+    } else {
+      useLightContext = false;
+      contextPath = 'full';
+    }
+  } else {
+    const isCasualFastPath = route.fastPathUsed && (route.agent === 'casual' || route.agent === 'chat') && !route.needsMemoryRead;
+    const isWebOnlyFastPath = route.fastPathUsed && route.needsWebFreshness && !route.needsMemoryRead;
+    const isReadOnlyProductivity = route.fastPathUsed && route.agent === 'productivity' && route.modelTierOverride === 'fast' && !route.needsMemoryRead;
+    useLightContext = isCasualFastPath || isWebOnlyFastPath || isReadOnlyProductivity;
+    contextPath = useLightContext ? 'light' : 'full';
+  }
+
+  const context = useLightContext
+    ? await buildLightContext(input, routerCtx)
+    : await buildContext(input, routerCtx);
   const contextBuildLatencyMs = Date.now() - contextStart;
+  if (useLightContext) {
+    console.log(`[handle-turn] light context (${contextPath}): route=${routeMs}ms, ctx=${contextBuildLatencyMs}ms, routerCtx=${routerContextMs}ms`);
+  }
 
-  // 4. Select agent
+  // 5. Select agent
   const agent = selectAgent(route.agent);
 
-  // 5. Run agent loop
+  // 6. Run agent loop
   const loopStart = Date.now();
-  const loopResult = await runAgentLoop(agent, context, input, route.allowedNamespaces);
+  const loopResult = await runAgentLoop(
+    agent,
+    context,
+    input,
+    route.allowedNamespaces,
+    route.modelTierOverride,
+    route.forcedToolChoice,
+    route.primaryDomain,
+    route.secondaryDomains,
+    route.reasoningEffortOverride,
+    route.classifierResult?.requiredCapabilities,
+    route.modelOverride,
+  );
   const agentLoopLatencyMs = Date.now() - loopStart;
 
-  // 6. Assemble TurnTrace
+  // 7. Assemble TurnTrace
   const toolTotalLatencyMs = loopResult.toolCallTraces.reduce((sum, t) => sum + t.latencyMs, 0);
   const promptHash = Array.from(
     new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(loopResult.systemPromptLength))))
@@ -200,6 +283,9 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     timezoneResolved: input.timezone ?? null,
 
     routeDecision: route,
+    classifierResult: route.classifierResult,
+    routeLayer: route.routeLayer,
+    classifierLatencyMs: route.routeLayer === '0C' ? route.routerLatencyMs : undefined,
 
     systemPromptLength: loopResult.systemPromptLength,
     systemPromptHash: promptHash,
@@ -209,11 +295,16 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     connectedAccountsCount: context.connectedAccounts.length,
     historyMessagesCount: context.history.length,
     contextBuildLatencyMs,
+    contextSubTimings: context.subTimings ?? null,
 
     agentName: agent.name,
-    modelUsed: agent.model,
+    modelUsed: loopResult.effectiveModel,
     agentLoopRounds: loopResult.rounds,
     agentLoopLatencyMs,
+
+    roundTraces: loopResult.roundTraces,
+    promptComposeMs: loopResult.promptComposeMs,
+    toolFilterMs: loopResult.toolFilterMs,
 
     toolCalls: loopResult.toolCallTraces,
     toolCallsBlocked: loopResult.toolCallsBlocked,
@@ -227,19 +318,29 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     responseLength: loopResult.text?.length ?? 0,
 
     totalLatencyMs: Date.now() - turnStart,
+    routerContextMs,
+    contextPath,
+    pendingActionDebug: {
+      pendingEmailSendCount: context.pendingEmailSends.length,
+      pendingEmailSendId: context.pendingEmailSend?.id ?? null,
+      pendingEmailSendStatus: context.pendingEmailSend?.status ?? null,
+      draftIdPresent: !!context.pendingEmailSend?.draftId,
+      accountPresent: !!context.pendingEmailSend?.account,
+      confirmationResult: route.confirmationState ?? 'not_checked',
+    },
 
     systemPrompt: loopResult.systemPrompt,
     initialMessages: loopResult.initialMessages,
     availableToolNames: loopResult.availableToolNames,
   };
 
-  console.log(`[handle-turn] ${turnId}: agent=${agent.name}, model=${agent.model}, route=${route.agent}(${route.mode}), context=${contextBuildLatencyMs}ms, loop=${agentLoopLatencyMs}ms, tools=${loopResult.toolCallTraces.length}(${toolTotalLatencyMs}ms), tokens=${loopResult.inputTokens}in/${loopResult.outputTokens}out, total=${trace.totalLatencyMs}ms`);
+  console.log(`[handle-turn] ${turnId}: agent=${agent.name}, model=${loopResult.effectiveModel}, route=${route.agent}(${route.mode}), routerCtx=${routerContextMs}ms, context=${contextBuildLatencyMs}ms, loop=${agentLoopLatencyMs}ms, tools=${loopResult.toolCallTraces.length}(${toolTotalLatencyMs}ms), tokens=${loopResult.inputTokens}in/${loopResult.outputTokens}out, rounds=${loopResult.rounds}(${loopResult.roundTraces.filter(r => r.wasRetry).length} retries), total=${trace.totalLatencyMs}ms`);
 
-  // 7. Persist — messages, tool traces, turn trace (fire-and-forget)
+  // 8. Persist — messages, tool traces, turn trace (fire-and-forget)
   persistTurn(input, loopResult, trace)
     .catch(err => console.warn('[handle-turn] persistTurn failed:', (err as Error).message));
 
-  // 8. Queue background work if needed (fire-and-forget)
+  // 9. Queue background work if needed (fire-and-forget)
   const bgJobType = shouldQueueBackgroundWork(input.userMessage, loopResult.toolsUsed);
   if (bgJobType) {
     queueBackgroundJob({
@@ -251,13 +352,17 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     }).catch(err => console.warn('[handle-turn] background job queue failed:', err));
   }
 
-  // 9. Extract and persist working memory (fire-and-forget)
-  extractWorkingMemory(
-    input.userMessage,
-    loopResult.text,
-    loopResult.toolsUsed,
-    context.workingMemory,
-  ).then(wm => persistWorkingMemory(input.chatId, wm))
+  // 10. Extract and persist working memory (fire-and-forget)
+  import('../state.ts')
+    .then(({ getPendingEmailSends }) => getPendingEmailSends(input.chatId))
+    .then((pendingEmailSends) => extractWorkingMemory(
+      input.userMessage,
+      loopResult.text,
+      loopResult.toolsUsed,
+      context.workingMemory,
+      pendingEmailSends,
+    ))
+    .then(wm => persistWorkingMemory(input.chatId, wm))
     .catch(err => console.warn('[handle-turn] working memory update failed:', err));
 
   return {

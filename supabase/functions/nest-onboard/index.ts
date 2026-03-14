@@ -297,6 +297,7 @@ async function upsertAccount(
 
     if (error) return { error: error.message };
     console.log(`[nest-onboard] Stored Microsoft account ${profile.email} for ${userId}`);
+    triggerIngestion(userId).catch((e) => console.warn(`[nest-onboard] ingestion trigger failed: ${(e as Error).message}`));
     return null;
   }
 
@@ -355,5 +356,41 @@ async function upsertAccount(
 
   if (error) return { error: error.message };
   console.log(`[nest-onboard] Stored Google account ${profile.email} for ${userId}`);
+  triggerIngestion(userId).catch((e) => console.warn(`[nest-onboard] ingestion trigger failed: ${(e as Error).message}`));
   return null;
+}
+
+async function triggerIngestion(authUserId: string): Promise<void> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        auth_user_id: authUserId,
+        mode: 'full',
+        sources: ['emails', 'calendar'],
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const data = await resp.json().catch(() => ({}));
+    console.log(`[nest-onboard] Triggered ingestion for ${authUserId}: job=${data.job_id ?? 'none'}, status=${resp.status}`);
+  } catch (e) {
+    const msg = (e as Error).message ?? '';
+    if (msg.includes('abort')) {
+      console.log(`[nest-onboard] Ingestion request sent for ${authUserId} (timed out — pipeline is running)`);
+    } else {
+      console.warn('[nest-onboard] triggerIngestion failed:', msg);
+    }
+  }
 }

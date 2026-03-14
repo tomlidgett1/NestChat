@@ -25,6 +25,54 @@ function cleanResponse(text: string): string {
     .trim();
 }
 
+const SEPARATOR_RE = /\n---\n|\n---$|^---\n|\s+---\s+|\s+---$|^---\s+/;
+const MAX_BUBBLE_LENGTH = 2000;
+
+function splitByParagraphs(text: string): string[] {
+  const chunks: string[] = [];
+  let current = '';
+  for (const paragraph of text.split('\n\n')) {
+    if (current && current.length + paragraph.length + 2 > MAX_BUBBLE_LENGTH) {
+      chunks.push(current.trim());
+      current = paragraph;
+    } else {
+      current = current ? `${current}\n\n${paragraph}` : paragraph;
+    }
+  }
+  if (current.trim()) {
+    const remaining = current.trim();
+    if (remaining.length <= MAX_BUBBLE_LENGTH) {
+      chunks.push(remaining);
+    } else {
+      for (let i = 0; i < remaining.length; i += MAX_BUBBLE_LENGTH) {
+        chunks.push(remaining.slice(i, i + MAX_BUBBLE_LENGTH));
+      }
+    }
+  }
+  return chunks.length > 0 ? chunks : [text.slice(0, MAX_BUBBLE_LENGTH)];
+}
+
+function splitBubbles(text: string): string[] {
+  const hasSeparator = text.includes('---');
+  const parts = hasSeparator
+    ? text.split(SEPARATOR_RE)
+    : text.includes('\n\n')
+      ? text.split(/\n\n+/)
+      : [text];
+
+  const chunks: string[] = [];
+  for (const raw of parts) {
+    const part = raw.trim();
+    if (!part) continue;
+    if (part.length <= MAX_BUBBLE_LENGTH) {
+      chunks.push(part);
+    } else {
+      chunks.push(...splitByParagraphs(part));
+    }
+  }
+  return chunks.length > 0 ? chunks : [text.trim().slice(0, MAX_BUBBLE_LENGTH)];
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -176,7 +224,7 @@ app.post(
     if (finalText || generatedImage) {
       // Split into multiple messages first, then clean each one
       // (must split before cleaning, or the --- delimiter gets mangled)
-      const messages = finalText ? finalText.split('---').map(m => cleanResponse(m)).filter(m => m.length > 0) : [];
+      const messages = finalText ? splitBubbles(finalText).map(m => cleanResponse(m)).filter(m => m.length > 0) : [];
 
       // Send text messages first (before generating image)
       if (messages.length > 0) {

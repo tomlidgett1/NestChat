@@ -42,7 +42,7 @@ export const calendarWriteTool: ToolContract = {
       description: { type: 'string', description: 'Event description or agenda.' },
       account: {
         type: 'string',
-        description: 'Account email to create/update/delete on. Defaults to primary Google account.',
+        description: 'Account email to create/update/delete on. If the user has multiple accounts, ask which one to use.',
       },
       calendar_id: {
         type: 'string',
@@ -77,6 +77,7 @@ export const calendarWriteTool: ToolContract = {
       const {
         resolveCalendarToken,
         fetchCalendarTimezone,
+        fetchOutlookTimezone,
         createGoogleEvent,
         createOutlookEvent,
         updateGoogleEvent,
@@ -91,6 +92,8 @@ export const calendarWriteTool: ToolContract = {
       let tz = 'UTC';
       if (token.provider === 'google') {
         try { tz = await fetchCalendarTimezone(token.accessToken); } catch { /* UTC fallback */ }
+      } else if (token.provider === 'microsoft') {
+        try { tz = await fetchOutlookTimezone(token.accessToken); } catch { /* UTC fallback */ }
       }
 
       if (action === 'create') {
@@ -108,7 +111,7 @@ export const calendarWriteTool: ToolContract = {
             description: input.description as string | undefined,
             all_day: input.all_day as boolean | undefined,
           }, tz);
-          return { content: JSON.stringify({ ...result, account: token.email, provider: 'microsoft' }), structuredData: result };
+          return { content: JSON.stringify({ ...result, verified: true, account: token.email, provider: 'microsoft' }), structuredData: { ...result, verified: true } };
         }
 
         const result = await createGoogleEvent(token.accessToken, {
@@ -121,7 +124,7 @@ export const calendarWriteTool: ToolContract = {
           all_day: input.all_day as boolean | undefined,
           send_updates: (input.notify_attendees === false) ? 'none' : 'all',
         }, tz);
-        return { content: JSON.stringify({ ...result, account: token.email, provider: 'google' }), structuredData: result };
+        return { content: JSON.stringify({ ...result, verified: true, account: token.email, provider: 'google' }), structuredData: { ...result, verified: true } };
       }
 
       if (action === 'update') {
@@ -138,13 +141,13 @@ export const calendarWriteTool: ToolContract = {
 
         if (token.provider === 'microsoft') {
           const result = await updateOutlookEvent(token.accessToken, input.event_id as string, updates, tz);
-          return { content: JSON.stringify({ ...result, account: token.email, provider: 'microsoft' }), structuredData: result };
+          return { content: JSON.stringify({ ...result, verified: true, account: token.email, provider: 'microsoft' }), structuredData: { ...result, verified: true } };
         }
 
         const calId = (input.calendar_id as string) || 'primary';
         const sendUpdates = (input.notify_attendees === false) ? 'none' : 'all';
         const result = await updateGoogleEvent(token.accessToken, input.event_id as string, calId, updates, tz, sendUpdates);
-        return { content: JSON.stringify({ ...result, account: token.email, provider: 'google' }), structuredData: result };
+        return { content: JSON.stringify({ ...result, verified: true, account: token.email, provider: 'google' }), structuredData: { ...result, verified: true } };
       }
 
       if (action === 'delete') {
@@ -152,13 +155,13 @@ export const calendarWriteTool: ToolContract = {
 
         if (token.provider === 'microsoft') {
           const result = await deleteOutlookEvent(token.accessToken, input.event_id as string);
-          return { content: JSON.stringify({ ...result, account: token.email, provider: 'microsoft' }), structuredData: result };
+          return { content: JSON.stringify({ ...result, verified: true, account: token.email, provider: 'microsoft' }), structuredData: { ...result, verified: true } };
         }
 
         const calId = (input.calendar_id as string) || 'primary';
         const sendUpdates = (input.notify_attendees === false) ? 'none' : 'all';
         const result = await deleteGoogleEvent(token.accessToken, input.event_id as string, calId, sendUpdates);
-        return { content: JSON.stringify({ ...result, account: token.email, provider: 'google' }), structuredData: result };
+        return { content: JSON.stringify({ ...result, verified: true, account: token.email, provider: 'google' }), structuredData: { ...result, verified: true } };
       }
 
       return { content: "Invalid action. Use 'create', 'update', or 'delete'." };

@@ -1,4 +1,4 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from './ai/models.ts';
 import {
   type ProactiveEligibleUser,
   transitionOnboardState,
@@ -8,9 +8,7 @@ import {
   type MemoryItem,
 } from './state.ts';
 
-const client = new Anthropic({
-  apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
-});
+const client = getOpenAIClient();
 
 // ============================================================================
 // Proactive action types
@@ -109,10 +107,9 @@ async function generateRecoveryNudge(user: ProactiveEligibleUser): Promise<strin
   const name = user.name ? ` ${user.name}` : '';
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 150,
-      system: `You are Nest, a personal assistant people text. Never mention AI, bots, or technology. Generate a brief, warm recovery nudge for a user who opened a conversation but never got to value. Keep it to 1-2 short sentences. Be casual and low-pressure. Australian spelling.
+    const response = await client.responses.create({
+      model: MODEL_MAP.agent,
+      instructions: `You are Nest, a personal assistant people text. Never mention AI, bots, or technology. Generate a brief, warm recovery nudge for a user who opened a conversation but never got to value. Keep it to 1-2 short sentences. Be casual and low-pressure. Australian spelling.
 
 The user's name is${name || ' unknown'}.
 
@@ -126,11 +123,14 @@ Bad examples:
 - "Hey! Just checking in!" (generic)
 - "Don't forget about Nest!" (desperate)
 - "I'm here to help!" (spammy)`,
-      messages: [{ role: 'user', content: 'Generate the recovery nudge.' }],
-    });
+      input: 'Generate the recovery nudge.',
+      max_output_tokens: 2048,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.agent },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    return text?.type === 'text' ? text.text.trim() : `Hey${name}, you can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it`;
+    const text = response.output_text;
+    return text ? text.trim() : `Hey${name}, you can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it`;
   } catch {
     return `Hey${name}, you can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it`;
   }
@@ -150,20 +150,22 @@ async function generateMorningCheckin(user: ProactiveEligibleUser): Promise<stri
       ? `\nYou know these things about them:\n${memories.map((m) => `- ${m.valueText}`).join('\n')}`
       : '';
 
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 100,
-      system: `You are Nest, a personal assistant. Generate a brief morning check-in message. Keep it to 1 short sentence. Be warm but not over-the-top. Australian spelling. Never mention AI or bots.
+    const response = await client.responses.create({
+      model: MODEL_MAP.agent,
+      instructions: `You are Nest, a personal assistant. Generate a brief morning check-in message. Keep it to 1 short sentence. Be warm but not over-the-top. Australian spelling. Never mention AI or bots.
 
 The user's name is${name || ' unknown'}.${memoryContext}
 
 Good: "Morning${name}. Anything on today that you want me to keep track of?"
 Bad: "Good morning! How are you doing today? I hope you're having a great day!" (too much)`,
-      messages: [{ role: 'user', content: 'Generate the morning check-in.' }],
-    });
+      input: 'Generate the morning check-in.',
+      max_output_tokens: 2048,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.agent },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    return text?.type === 'text' ? text.text.trim() : `Morning${name}. Anything on today you want me to keep track of?`;
+    const text = response.output_text;
+    return text ? text.trim() : `Morning${name}. Anything on today you want me to keep track of?`;
   } catch {
     return `Morning${name}. Anything on today you want me to keep track of?`;
   }
@@ -220,10 +222,9 @@ async function generateMemoryMomentMessage(user: ProactiveEligibleUser, memory: 
   const name = user.name ? ` ${user.name}` : '';
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 100,
-      system: `You are Nest, a personal assistant. Generate a brief, helpful follow-up message that references something you remember about the user. Keep it to 1-2 short sentences. Be warm and useful, not creepy. Australian spelling. Never mention AI or bots.
+    const response = await client.responses.create({
+      model: MODEL_MAP.agent,
+      instructions: `You are Nest, a personal assistant. Generate a brief, helpful follow-up message that references something you remember about the user. Keep it to 1-2 short sentences. Be warm and useful, not creepy. Australian spelling. Never mention AI or bots.
 
 The user's name is${name || ' unknown'}.
 The memory to reference: "${memory.valueText}" (category: ${memory.category})
@@ -232,11 +233,14 @@ The goal is to make the user feel supported, not surveilled. Reference the memor
 
 Good: "Morning${name}. Hope the prescription pickup went smoothly yesterday. Do you still want to send that email to the school today?"
 Bad: "I remember you mentioned your mum's birthday is coming up!" (just showing off memory)`,
-      messages: [{ role: 'user', content: 'Generate the memory moment message.' }],
-    });
+      input: 'Generate the memory moment message.',
+      max_output_tokens: 2048,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.agent },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    return text?.type === 'text' ? text.text.trim() : null as unknown as string;
+    const text = response.output_text;
+    return text ? text.trim() : null as unknown as string;
   } catch {
     return null as unknown as string;
   }

@@ -1,4 +1,4 @@
-import { CONVERSATION_MESSAGES_TABLE, CONVERSATIONS_TABLE, JOB_FAILURES_TABLE, OUTBOUND_MESSAGES_TABLE, USER_PROFILES_TABLE, WEBHOOK_EVENTS_TABLE, MEMORY_ITEMS_TABLE, CONVERSATION_SUMMARIES_TABLE, TOOL_TRACES_TABLE } from './env.ts';
+import { CONVERSATION_MESSAGES_TABLE, CONVERSATIONS_TABLE, JOB_FAILURES_TABLE, OUTBOUND_MESSAGES_TABLE, USER_PROFILES_TABLE, WEBHOOK_EVENTS_TABLE, MEMORY_ITEMS_TABLE, CONVERSATION_SUMMARIES_TABLE, TOOL_TRACES_TABLE, PENDING_ACTIONS_TABLE } from './env.ts';
 import { getAdminClient } from './supabase.ts';
 import type { MessageService, NormalisedIncomingMessage, SendblueWebhookEvent } from './sendblue.ts';
 
@@ -81,6 +81,40 @@ export interface ToolTrace {
   createdAt: string;
 }
 
+export type PendingActionStatus =
+  | 'awaiting_confirmation'
+  | 'completed'
+  | 'cancelled'
+  | 'failed'
+  | 'expired';
+
+export interface PendingEmailSendAction {
+  id: number;
+  chatId: string;
+  actionType: 'email_send';
+  status: PendingActionStatus;
+  draftId: string | null;
+  account: string | null;
+  to: string[];
+  subject: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  cc: string[];
+  bcc: string[];
+  replyToThreadId: string | null;
+  replyAll: boolean;
+  sourceTurnId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  failureReason: string | null;
+  providerMessageId: string | null;
+  sentAt: string | null;
+}
+
 export interface IdleConversation {
   chatId: string;
   messageCount: number;
@@ -108,7 +142,7 @@ export interface UserProfile {
 }
 
 export interface ConnectedAccount {
-  provider: 'google' | 'microsoft';
+  provider: 'google' | 'microsoft' | 'granola';
   email: string;
   name: string | null;
   isPrimary: boolean;
@@ -454,7 +488,7 @@ export async function getUserProfile(handle: string): Promise<UserProfile | null
 export async function getConnectedAccounts(authUserId: string): Promise<ConnectedAccount[]> {
   const supabase = getAdminClient();
 
-  const [googleResult, microsoftResult] = await Promise.all([
+  const [googleResult, microsoftResult, granolaResult] = await Promise.all([
     supabase
       .from('user_google_accounts')
       .select('google_email, google_name, is_primary, scopes')
@@ -462,6 +496,10 @@ export async function getConnectedAccounts(authUserId: string): Promise<Connecte
     supabase
       .from('user_microsoft_accounts')
       .select('microsoft_email, microsoft_name, is_primary')
+      .eq('user_id', authUserId),
+    supabase
+      .from('user_granola_accounts')
+      .select('granola_email, granola_name, is_primary')
       .eq('user_id', authUserId),
   ]);
 
@@ -487,6 +525,18 @@ export async function getConnectedAccounts(authUserId: string): Promise<Connecte
         name: row.microsoft_name ?? null,
         isPrimary: row.is_primary ?? false,
         scopes: [],
+      });
+    }
+  }
+
+  if (!granolaResult.error && granolaResult.data) {
+    for (const row of granolaResult.data) {
+      accounts.push({
+        provider: 'granola',
+        email: row.granola_email,
+        name: row.granola_name ?? null,
+        isPrimary: row.is_primary ?? false,
+        scopes: ['meetings'],
       });
     }
   }
@@ -878,6 +928,66 @@ interface ToolTraceRow {
   created_at: string;
 }
 
+interface PendingActionRow {
+  id: number;
+  chat_id: string;
+  action_type: string;
+  status: PendingActionStatus;
+  draft_id: string | null;
+  account: string | null;
+  to_recipients: unknown;
+  subject: string | null;
+  body_text: string | null;
+  body_html: string | null;
+  cc: unknown;
+  bcc: unknown;
+  reply_to_thread_id: string | null;
+  reply_all: boolean;
+  source_turn_id: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+  completed_at: string | null;
+  failed_at: string | null;
+  failure_reason: string | null;
+  provider_message_id: string | null;
+  sent_at: string | null;
+}
+
+function parseRecipientList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function rowToPendingEmailSendAction(row: PendingActionRow): PendingEmailSendAction {
+  return {
+    id: row.id,
+    chatId: row.chat_id,
+    actionType: 'email_send',
+    status: row.status,
+    draftId: row.draft_id,
+    account: row.account,
+    to: parseRecipientList(row.to_recipients),
+    subject: row.subject,
+    bodyText: row.body_text,
+    bodyHtml: row.body_html,
+    cc: parseRecipientList(row.cc),
+    bcc: parseRecipientList(row.bcc),
+    replyToThreadId: row.reply_to_thread_id,
+    replyAll: row.reply_all ?? false,
+    sourceTurnId: row.source_turn_id,
+    metadata: row.metadata ?? {},
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    expiresAt: row.expires_at,
+    completedAt: row.completed_at,
+    failedAt: row.failed_at,
+    failureReason: row.failure_reason,
+    providerMessageId: row.provider_message_id,
+    sentAt: row.sent_at,
+  };
+}
+
 export async function insertToolTrace(params: {
   chatId: string;
   messageId?: number | null;
@@ -924,6 +1034,210 @@ export async function getRecentToolTraces(chatId: string, limit = 5): Promise<To
     safeSummary: row.safe_summary,
     createdAt: row.created_at,
   }));
+}
+
+// ============================================================================
+// Pending email send actions
+// ============================================================================
+
+export async function createPendingEmailSend(params: {
+  chatId: string;
+  draftId?: string | null;
+  account?: string | null;
+  to: string[];
+  subject: string | null;
+  bodyText?: string | null;
+  bodyHtml?: string | null;
+  cc?: string[];
+  bcc?: string[];
+  replyToThreadId?: string | null;
+  replyAll?: boolean;
+  sourceTurnId?: string | null;
+  metadata?: Record<string, unknown>;
+  expiresAt?: string | null;
+}): Promise<PendingEmailSendAction | null> {
+  const supabase = getAdminClient();
+
+  await expirePendingEmailSends(params.chatId);
+  await cancelPendingEmailSends(params.chatId);
+
+  const { data, error } = await supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .insert({
+      chat_id: params.chatId,
+      action_type: 'email_send',
+      status: 'awaiting_confirmation',
+      draft_id: params.draftId ?? null,
+      account: params.account ?? null,
+      to_recipients: params.to,
+      subject: params.subject,
+      body_text: params.bodyText ?? null,
+      body_html: params.bodyHtml ?? null,
+      cc: params.cc ?? [],
+      bcc: params.bcc ?? [],
+      reply_to_thread_id: params.replyToThreadId ?? null,
+      reply_all: params.replyAll ?? false,
+      source_turn_id: params.sourceTurnId ?? null,
+      metadata: params.metadata ?? {},
+      expires_at: params.expiresAt ?? new Date(Date.now() + (60 * 60 * 1000)).toISOString(),
+    })
+    .select('id, chat_id, action_type, status, draft_id, account, to_recipients, subject, body_text, body_html, cc, bcc, reply_to_thread_id, reply_all, source_turn_id, metadata, created_at, updated_at, expires_at, completed_at, failed_at, failure_reason, provider_message_id, sent_at')
+    .single<PendingActionRow>();
+
+  if (error) {
+    console.error('[state] Error creating pending email send:', error);
+    return null;
+  }
+
+  return rowToPendingEmailSendAction(data);
+}
+
+export async function getLatestPendingEmailSend(chatId: string): Promise<PendingEmailSendAction | null> {
+  const supabase = getAdminClient();
+  await expirePendingEmailSends(chatId);
+
+  const { data, error } = await supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .select('id, chat_id, action_type, status, draft_id, account, to_recipients, subject, body_text, body_html, cc, bcc, reply_to_thread_id, reply_all, source_turn_id, metadata, created_at, updated_at, expires_at, completed_at, failed_at, failure_reason, provider_message_id, sent_at')
+    .eq('chat_id', chatId)
+    .eq('action_type', 'email_send')
+    .eq('status', 'awaiting_confirmation')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle<PendingActionRow>();
+
+  if (error) {
+    console.error('[state] Error getting latest pending email send:', error);
+    return null;
+  }
+
+  return data ? rowToPendingEmailSendAction(data) : null;
+}
+
+export async function getPendingEmailSends(chatId: string): Promise<PendingEmailSendAction[]> {
+  const supabase = getAdminClient();
+  await expirePendingEmailSends(chatId);
+
+  const { data, error } = await supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .select('id, chat_id, action_type, status, draft_id, account, to_recipients, subject, body_text, body_html, cc, bcc, reply_to_thread_id, reply_all, source_turn_id, metadata, created_at, updated_at, expires_at, completed_at, failed_at, failure_reason, provider_message_id, sent_at')
+    .eq('chat_id', chatId)
+    .eq('action_type', 'email_send')
+    .eq('status', 'awaiting_confirmation')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[state] Error getting pending email sends:', error);
+    return [];
+  }
+
+  return ((data as PendingActionRow[] | null) || []).map(rowToPendingEmailSendAction);
+}
+
+export async function updatePendingEmailDraft(id: number, updates: {
+  to?: string[];
+  subject?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  cc?: string[];
+  bcc?: string[];
+}): Promise<PendingEmailSendAction | null> {
+  const supabase = getAdminClient();
+  const patch: Record<string, unknown> = {};
+  if (updates.to !== undefined) patch.to_recipients = updates.to;
+  if (updates.subject !== undefined) patch.subject = updates.subject;
+  if (updates.bodyText !== undefined) patch.body_text = updates.bodyText;
+  if (updates.bodyHtml !== undefined) patch.body_html = updates.bodyHtml;
+  if (updates.cc !== undefined) patch.cc = updates.cc;
+  if (updates.bcc !== undefined) patch.bcc = updates.bcc;
+
+  const { data, error } = await supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .update(patch)
+    .eq('id', id)
+    .eq('status', 'awaiting_confirmation')
+    .select('id, chat_id, action_type, status, draft_id, account, to_recipients, subject, body_text, body_html, cc, bcc, reply_to_thread_id, reply_all, source_turn_id, metadata, created_at, updated_at, expires_at, completed_at, failed_at, failure_reason, provider_message_id, sent_at')
+    .maybeSingle<PendingActionRow>();
+
+  if (error) {
+    console.error('[state] Error updating pending email draft:', error);
+    return null;
+  }
+
+  return data ? rowToPendingEmailSendAction(data) : null;
+}
+
+export async function completePendingEmailSend(id: number, providerMessageId?: string, verified?: boolean): Promise<void> {
+  const supabase = getAdminClient();
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .update({
+      status: 'completed',
+      completed_at: now,
+      sent_at: now,
+      provider_message_id: providerMessageId ?? null,
+      failure_reason: null,
+      verified: verified ?? false,
+    })
+    .eq('id', id);
+
+  if (error) {
+    console.error('[state] Error completing pending email send:', error);
+  }
+}
+
+export async function cancelPendingEmailSends(chatId: string, reason = 'superseded'): Promise<void> {
+  const supabase = getAdminClient();
+  const { error } = await supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .update({
+      status: 'cancelled',
+      failure_reason: reason,
+    })
+    .eq('chat_id', chatId)
+    .eq('action_type', 'email_send')
+    .eq('status', 'awaiting_confirmation');
+
+  if (error) {
+    console.error('[state] Error cancelling pending email sends:', error);
+  }
+}
+
+export async function failPendingEmailSend(id: number, reason: string): Promise<void> {
+  const supabase = getAdminClient();
+  const { error } = await supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .update({
+      status: 'failed',
+      failed_at: new Date().toISOString(),
+      failure_reason: reason,
+    })
+    .eq('id', id);
+
+  if (error) {
+    console.error('[state] Error failing pending email send:', error);
+  }
+}
+
+export async function expirePendingEmailSends(chatId?: string): Promise<void> {
+  const supabase = getAdminClient();
+  let query = supabase
+    .from(PENDING_ACTIONS_TABLE)
+    .update({
+      status: 'expired',
+      failure_reason: 'expired',
+    })
+    .eq('action_type', 'email_send')
+    .eq('status', 'awaiting_confirmation')
+    .lt('expires_at', new Date().toISOString());
+
+  if (chatId) query = query.eq('chat_id', chatId);
+
+  const { error } = await query;
+  if (error) {
+    console.error('[state] Error expiring pending email sends:', error);
+  }
 }
 
 // ============================================================================

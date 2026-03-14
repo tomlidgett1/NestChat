@@ -1,9 +1,7 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from './ai/models.ts';
 import type { EntryState, ValueWedge } from './state.ts';
 
-const client = new Anthropic({
-  apiKey: Deno.env.get('ANTHROPIC_API_KEY'),
-});
+const client = getOpenAIClient();
 
 export interface ClassificationResult {
   entryState: EntryState;
@@ -15,7 +13,7 @@ export interface ClassificationResult {
   emotionalLoad: 'none' | 'low' | 'moderate' | 'high';
 }
 
-const CLASSIFIER_PROMPT = `You are a message classifier for a personal assistant called Nest. Given a user's first message, classify it.
+const CLASSIFIER_INSTRUCTIONS = `You are a message classifier for a personal assistant called Nest. Given a user's first message, classify it.
 
 Respond with ONLY valid JSON:
 {
@@ -54,19 +52,19 @@ export async function classifyEntryState(message: string, pdlContext?: string): 
     : `User message: "${message}"`;
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 200,
-      system: CLASSIFIER_PROMPT,
-      messages: [{ role: 'user', content: userContent }],
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.orchestration,
+      instructions: CLASSIFIER_INSTRUCTIONS,
+      input: userContent,
+      max_output_tokens: 1024,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.orchestration },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content.find((b) => b.type === 'text');
-    if (!text || text.type !== 'text') {
-      return defaultClassification();
-    }
+    const text = response.output_text;
+    if (!text) return defaultClassification();
 
-    let rawText = text.text.trim();
+    let rawText = text.trim();
     const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch) rawText = fenceMatch[1].trim();
 

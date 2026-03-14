@@ -39,6 +39,7 @@ export const CONVERSATION_MESSAGES_TABLE = getOptionalEnv('CONVERSATION_MESSAGES
 export const MEMORY_ITEMS_TABLE = getOptionalEnv('MEMORY_ITEMS_TABLE') || 'memory_items';
 export const CONVERSATION_SUMMARIES_TABLE = getOptionalEnv('CONVERSATION_SUMMARIES_TABLE') || 'conversation_summaries';
 export const TOOL_TRACES_TABLE = getOptionalEnv('TOOL_TRACES_TABLE') || 'tool_traces';
+export const PENDING_ACTIONS_TABLE = getOptionalEnv('PENDING_ACTIONS_TABLE') || 'pending_actions';
 
 export const ONBOARDING_EVENTS_TABLE = getOptionalEnv('ONBOARDING_EVENTS_TABLE') || 'onboarding_events';
 export const PROACTIVE_MESSAGES_TABLE = getOptionalEnv('PROACTIVE_MESSAGES_TABLE') || 'proactive_messages';
@@ -49,3 +50,5 @@ export const SEARCH_EMBEDDINGS_TABLE = getOptionalEnv('SEARCH_EMBEDDINGS_TABLE')
 
 export const MEMORY_V2_ENABLED = (getOptionalEnv('MEMORY_V2_ENABLED') || 'true') === 'true';
 export const EXTRACTOR_VERSION = getOptionalEnv('MEMORY_EXTRACTOR_VERSION') || 'v2.0';
+
+export const OPTION_A_ROUTING = (getOptionalEnv('OPTION_A_ROUTING') || 'true') === 'true';

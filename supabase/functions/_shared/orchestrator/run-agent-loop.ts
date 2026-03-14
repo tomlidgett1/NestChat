@@ -1,4 +1,12 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
+import {
+  getOpenAIClient,
+  MODEL_MAP,
+  REASONING_EFFORT,
+  type OpenAITool,
+  type FunctionCallOutput,
+  type ModelTier,
+  type ReasoningEffort,
+} from '../ai/models.ts';
 import type {
   AgentConfig,
   TurnContext,
@@ -7,16 +15,17 @@ import type {
   ToolCallTrace,
   ToolCallBlockedTrace,
   ToolNamespace,
+  RoundTrace,
   Reaction,
   MessageEffect,
   RememberedUser,
   GeneratedImage,
 } from './types.ts';
 import type { PendingToolCall, ToolContext, ToolExecutionResult } from '../tools/types.ts';
-import { toAnthropicTool } from '../tools/types.ts';
+import { toOpenAITool } from '../tools/types.ts';
 import { filterToolsByNamespace } from '../tools/namespace-filter.ts';
 import { executePoliciedToolCalls } from '../tools/executor.ts';
-import { composePrompt } from '../agents/prompt-layers.ts';
+import { composePrompt, composeCompactPrompt } from '../agents/prompt-layers.ts';
 
 type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
 
@@ -62,7 +71,43 @@ function extractSideEffectsFromExecutor(execResults: ToolExecutionResult[]): Sid
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Main agent loop — handles pause_turn, max_tokens, parallel tools
+// Model resolution — upgrade casual tier when judgement tools present
+// ═══════════════════════════════════════════════════════════════
+
+function resolveModelTier(agent: AgentConfig): ModelTier {
+  return agent.modelTier;
+}
+
+function stripLinksFromText(text: string): string {
+  // Convert markdown links to plain anchor text.
+  let cleaned = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, '$1');
+  // Remove any remaining raw URLs.
+  cleaned = cleaned.replace(/\bhttps?:\/\/[^\s)]+/gi, '');
+  // Remove orphaned angle-bracket URLs.
+  cleaned = cleaned.replace(/<\s*https?:\/\/[^>]+>/gi, '');
+  // Normalise extra spaces created by removals.
+  cleaned = cleaned.replace(/[ \t]{2,}/g, ' ');
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned.trim();
+}
+
+function detectForcedToolChoice(
+  msg: string,
+  availableToolNames: string[],
+): string | undefined {
+  const toolSet = new Set(availableToolNames);
+  const lower = msg.toLowerCase();
+
+  const wantsWebSearch = /\b(use (the )?(internet|web)|search (the )?(web|internet|online)|google|look.{0,10}up online|browse)\b/i.test(lower);
+  if (wantsWebSearch && toolSet.has('web_search')) {
+    return 'required';
+  }
+
+  return undefined;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Main agent loop — OpenAI Responses API with reasoning
 // ═══════════════════════════════════════════════════════════════
 
 export async function runAgentLoop(
@@ -70,16 +115,47 @@ export async function runAgentLoop(
   context: TurnContext,
   input: TurnInput,
   allowedNamespaces: ToolNamespace[],
+  modelTierOverride?: ModelTier,
+  routerForcedToolChoice?: string,
+  primaryDomain?: import('./types.ts').DomainTag,
+  secondaryDomains?: import('./types.ts').DomainTag[],
+  reasoningEffortOverride?: ReasoningEffort,
+  capabilities?: import('./types.ts').Capability[],
+  modelOverride?: string,
 ): Promise<AgentLoopResult> {
-  const client = new Anthropic({ apiKey: Deno.env.get('ANTHROPIC_API_KEY') });
+  const client = getOpenAIClient();
 
-  const systemPrompt = composePrompt(agent, context, input);
+  const promptStart = Date.now();
+  const isLightCasual = (agent.name === 'casual' || agent.name === 'chat')
+    && context.memoryItems.length === 0
+    && context.summaries.length === 0
+    && allowedNamespaces.length <= 6;
+  const systemPrompt = isLightCasual
+    ? composeCompactPrompt(context, input)
+    : composePrompt(agent, context, input, primaryDomain, secondaryDomains, capabilities);
+  const promptComposeMs = Date.now() - promptStart;
 
-  const availableTools = filterToolsByNamespace(allowedNamespaces);
-  const anthropicTools: Anthropic.Tool[] = availableTools.map(toAnthropicTool);
+  const filterStart = Date.now();
+  const availableTools = isLightCasual ? [] : filterToolsByNamespace(allowedNamespaces);
+  const openaiTools: OpenAITool[] = availableTools.map(toOpenAITool);
+  const toolFilterMs = Date.now() - filterStart;
 
-  const apiMessages: Anthropic.MessageParam[] = [
-    ...context.formattedHistory,
+  const effectiveTier = modelTierOverride ?? resolveModelTier(agent);
+  const effectiveModel = modelOverride ?? MODEL_MAP[effectiveTier];
+  const reasoningEffort = reasoningEffortOverride ?? REASONING_EFFORT[effectiveTier];
+
+  if (modelOverride) {
+    console.log(`[agent-loop] model overridden to '${modelOverride}' (default would be '${MODEL_MAP[effectiveTier]}')`);
+  }
+  if (reasoningEffortOverride) {
+    console.log(`[agent-loop] reasoning effort overridden to '${reasoningEffortOverride}' (default would be '${REASONING_EFFORT[effectiveTier]}')`);
+  }
+
+  const recentHistory = isLightCasual
+    ? context.formattedHistory.slice(-4)
+    : context.formattedHistory;
+  const apiInput: Record<string, unknown>[] = [
+    ...recentHistory,
     { role: 'user', content: context.messageContent },
   ];
 
@@ -87,76 +163,196 @@ export async function runAgentLoop(
     chatId: input.chatId,
     senderHandle: input.senderHandle,
     authUserId: input.authUserId,
+    pendingEmailSend: context.pendingEmailSend,
+    pendingEmailSends: context.pendingEmailSends,
   };
 
-  let finalTextParts: string[] = [];
+  let finalText = '';
   const allToolTraces: ToolCallTrace[] = [];
   const allBlocked: ToolCallBlockedTrace[] = [];
   const allExecResults: ToolExecutionResult[] = [];
   const toolsUsed: Array<{ tool: string; detail?: string }> = [];
+  const roundTraces: RoundTrace[] = [];
   let roundCount = 0;
-  let currentMaxTokens = agent.maxTokens;
+  let currentMaxOutputTokens = agent.maxOutputTokens;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
 
   const maxRounds = agent.toolPolicy.maxToolRounds;
 
-  console.log(`[agent-loop] starting: agent=${agent.name}, model=${agent.model}, tools=${availableTools.length}, maxRounds=${maxRounds}, promptLen=${systemPrompt.length}`);
+  const userForcedToolChoice = detectForcedToolChoice(input.userMessage, availableTools.map(t => t.name));
+  const forcedToolChoice = routerForcedToolChoice ?? userForcedToolChoice;
+
+  if (forcedToolChoice) {
+    const source = routerForcedToolChoice ? 'router' : 'explicit user request';
+    console.log(`[agent-loop] forcing tool_choice: ${forcedToolChoice} (${source})`);
+  }
+  console.log(`[agent-loop] starting: agent=${agent.name}, model=${effectiveModel}, effort=${reasoningEffort}, tools=${availableTools.length}, maxRounds=${maxRounds}, promptLen=${systemPrompt.length}, promptComposeMs=${promptComposeMs}, toolFilterMs=${toolFilterMs}`);
 
   for (let round = 0; round <= maxRounds; round++) {
     roundCount++;
     const roundStart = Date.now();
 
-    const response = await client.messages.create({
-      model: agent.model,
-      max_tokens: currentMaxTokens,
-      system: systemPrompt,
-      tools: anthropicTools,
-      messages: apiMessages,
-    });
+    const useToolChoice = round === 0 && forcedToolChoice ? forcedToolChoice : undefined;
 
-    const roundLatency = Date.now() - roundStart;
-    totalInputTokens += response.usage?.input_tokens ?? 0;
-    totalOutputTokens += response.usage?.output_tokens ?? 0;
+    const useReasoning = reasoningEffort !== 'none';
+    const keepHighEffort = reasoningEffortOverride && round <= 4;
+    const roundEffort = !useReasoning
+      ? 'none' as ReasoningEffort
+      : keepHighEffort
+        ? reasoningEffort
+        : round > 0 && reasoningEffort !== 'low'
+          ? 'low' as ReasoningEffort
+          : reasoningEffort;
+    if (useReasoning && roundEffort !== reasoningEffort) {
+      console.log(`[agent-loop] round ${round + 1}: reasoning effort downgraded ${reasoningEffort} → ${roundEffort} (post-tool formatting)`);
+    }
 
-    console.log(`[agent-loop] round ${roundCount}/${maxRounds + 1}: stop=${response.stop_reason}, blocks=${response.content.length}, tokens=${response.usage?.input_tokens ?? 0}in/${response.usage?.output_tokens ?? 0}out, ${roundLatency}ms`);
+    const apiCallStart = Date.now();
+    const reasoningParams = useReasoning
+      ? { reasoning: { effort: roundEffort }, include: ['reasoning.encrypted_content'] }
+      : {};
+    const response = await client.responses.create({
+      model: effectiveModel,
+      instructions: systemPrompt,
+      input: apiInput as Parameters<typeof client.responses.create>[0]['input'],
+      tools: openaiTools as Parameters<typeof client.responses.create>[0]['tools'],
+      max_output_tokens: currentMaxOutputTokens,
+      store: false,
+      ...reasoningParams,
+      ...(useToolChoice ? { tool_choice: useToolChoice } : {}),
+    } as Parameters<typeof client.responses.create>[0]);
+    const apiCallMs = Date.now() - apiCallStart;
 
-    const roundTextParts: string[] = [];
+    const usage = (response as Record<string, unknown>).usage as Record<string, number> | undefined;
+    const roundInputTokens = usage?.input_tokens ?? 0;
+    const roundOutputTokens = usage?.output_tokens ?? 0;
+    totalInputTokens += roundInputTokens;
+    totalOutputTokens += roundOutputTokens;
+
+    const roundText = response.output_text ?? '';
     const pendingCalls: PendingToolCall[] = [];
-    for (const block of response.content) {
-      if (block.type === 'text') {
-        roundTextParts.push(block.text);
-      } else if (block.type === 'tool_use') {
+    let roundWebSearch = false;
+
+    for (const item of response.output) {
+      if (item.type === 'function_call') {
+        const fc = item as unknown as { call_id: string; name: string; arguments: string };
+        let parsedArgs: Record<string, unknown> = {};
+        try { parsedArgs = JSON.parse(fc.arguments); } catch { /* empty */ }
         pendingCalls.push({
-          id: block.id,
-          name: block.name,
-          input: block.input as Record<string, unknown>,
+          id: fc.call_id,
+          name: fc.name,
+          input: parsedArgs,
         });
-        const detail = summariseToolDetail(block.name, block.input as Record<string, unknown>);
-        toolsUsed.push({ tool: block.name, ...(detail ? { detail } : {}) });
-        console.log(`[agent-loop] tool_use: ${block.name} ${JSON.stringify(block.input).substring(0, 200)}`);
+        const detail = summariseToolDetail(fc.name, parsedArgs);
+        toolsUsed.push({ tool: fc.name, ...(detail ? { detail } : {}) });
+        console.log(`[agent-loop] function_call: ${fc.name} ${fc.arguments.substring(0, 200)}`);
+      } else if (item.type === 'web_search_call') {
+        roundWebSearch = true;
+        toolsUsed.push({ tool: 'web_search' });
+        allToolTraces.push({
+          name: 'web_search',
+          namespace: 'web.search',
+          sideEffect: 'read',
+          latencyMs: 0,
+          outcome: 'success',
+        });
+        console.log(`[agent-loop] web_search_call`);
       }
     }
 
-    // Handle max_tokens truncation: if last block is incomplete tool_use, retry with higher limit
-    if (response.stop_reason === 'max_tokens') {
-      const lastBlock = response.content[response.content.length - 1];
-      if (lastBlock?.type === 'tool_use') {
-        currentMaxTokens = Math.min(currentMaxTokens * 2, 8192);
+    console.log(`[agent-loop] round ${roundCount}/${maxRounds + 1}: status=${response.status}, items=${response.output.length}, textLen=${roundText.length}, apiMs=${apiCallMs}, tokens=${roundInputTokens}in/${roundOutputTokens}out`);
+
+    // Handle incomplete response (reasoning exhausted token budget)
+    if (response.status === 'incomplete') {
+      const reason = (response as Record<string, unknown>).incomplete_details as Record<string, string> | undefined;
+      if (reason?.reason === 'max_output_tokens') {
+        if (pendingCalls.length > 0 || roundText.length === 0) {
+          const prevMax = currentMaxOutputTokens;
+          currentMaxOutputTokens = Math.min(currentMaxOutputTokens * 2, 32768);
+          console.log(`[agent-loop] token budget exhausted (text=${roundText.length}), retrying with ${currentMaxOutputTokens}`);
+          roundTraces.push({
+            round: roundCount,
+            apiLatencyMs: apiCallMs,
+            toolExecLatencyMs: 0,
+            totalRoundMs: Date.now() - roundStart,
+            inputTokens: roundInputTokens,
+            outputTokens: roundOutputTokens,
+            status: response.status,
+            functionCallCount: pendingCalls.length,
+            webSearchCalled: roundWebSearch,
+            textLength: roundText.length,
+            wasRetry: true,
+            retryReason: `max_output_tokens (${prevMax} → ${currentMaxOutputTokens})`,
+            maxOutputTokens: prevMax,
+            reasoningEffort: roundEffort,
+          });
+          continue;
+        }
+        finalText = roundText;
+        roundTraces.push({
+          round: roundCount,
+          apiLatencyMs: apiCallMs,
+          toolExecLatencyMs: 0,
+          totalRoundMs: Date.now() - roundStart,
+          inputTokens: roundInputTokens,
+          outputTokens: roundOutputTokens,
+          status: 'incomplete_accepted',
+          functionCallCount: 0,
+          webSearchCalled: roundWebSearch,
+          textLength: roundText.length,
+          wasRetry: false,
+          maxOutputTokens: currentMaxOutputTokens,
+          reasoningEffort: roundEffort,
+        });
+        break;
+      }
+    }
+
+    // Reasoning model spent entire budget on reasoning/search with no text output
+    if (pendingCalls.length === 0 && roundText.length === 0 && response.output.length > 0) {
+      if (currentMaxOutputTokens < 32768) {
+        const prevMax = currentMaxOutputTokens;
+        currentMaxOutputTokens = Math.min(currentMaxOutputTokens * 2, 32768);
+        console.warn(`[agent-loop] no text produced despite ${response.output.length} output items, retrying with ${currentMaxOutputTokens} tokens`);
+        roundTraces.push({
+          round: roundCount,
+          apiLatencyMs: apiCallMs,
+          toolExecLatencyMs: 0,
+          totalRoundMs: Date.now() - roundStart,
+          inputTokens: roundInputTokens,
+          outputTokens: roundOutputTokens,
+          status: 'empty_retry',
+          functionCallCount: 0,
+          webSearchCalled: roundWebSearch,
+          textLength: 0,
+          wasRetry: true,
+          retryReason: `no text output (${prevMax} → ${currentMaxOutputTokens})`,
+          maxOutputTokens: prevMax,
+          reasoningEffort: roundEffort,
+        });
         continue;
       }
-      finalTextParts = roundTextParts;
-      break;
     }
 
-    // Handle pause_turn: append assistant content and continue the loop
-    if (response.stop_reason === 'pause_turn') {
-      apiMessages.push({ role: 'assistant', content: response.content });
-      continue;
-    }
-
-    if (response.stop_reason !== 'tool_use' || pendingCalls.length === 0) {
-      finalTextParts = roundTextParts;
+    // No function calls — we're done
+    if (pendingCalls.length === 0) {
+      finalText = roundText;
+      roundTraces.push({
+        round: roundCount,
+        apiLatencyMs: apiCallMs,
+        toolExecLatencyMs: 0,
+        totalRoundMs: Date.now() - roundStart,
+        inputTokens: roundInputTokens,
+        outputTokens: roundOutputTokens,
+        status: response.status,
+        functionCallCount: 0,
+        webSearchCalled: roundWebSearch,
+        textLength: roundText.length,
+        wasRetry: false,
+        maxOutputTokens: currentMaxOutputTokens,
+        reasoningEffort: roundEffort,
+      });
       break;
     }
 
@@ -166,6 +362,9 @@ export async function runAgentLoop(
     }));
     conversationHistory.push({ role: 'user', content: input.userMessage });
 
+    const priorTurnToolNames = allExecResults.map(r => r.toolName);
+
+    const toolExecStart = Date.now();
     const { toolResults, execResults } = await executePoliciedToolCalls(
       pendingCalls,
       toolCtx,
@@ -173,15 +372,39 @@ export async function runAgentLoop(
       allToolTraces,
       allBlocked,
       conversationHistory,
+      priorTurnToolNames,
     );
+    const toolExecMs = Date.now() - toolExecStart;
     allExecResults.push(...execResults);
 
-    apiMessages.push({ role: 'assistant', content: response.content });
-    apiMessages.push({ role: 'user', content: toolResults });
+    roundTraces.push({
+      round: roundCount,
+      apiLatencyMs: apiCallMs,
+      toolExecLatencyMs: toolExecMs,
+      totalRoundMs: Date.now() - roundStart,
+      inputTokens: roundInputTokens,
+      outputTokens: roundOutputTokens,
+      status: response.status,
+      functionCallCount: pendingCalls.length,
+      webSearchCalled: roundWebSearch,
+      textLength: roundText.length,
+      wasRetry: false,
+      maxOutputTokens: currentMaxOutputTokens,
+      reasoningEffort: roundEffort,
+    });
+
+    // Feed back all output items (preserves reasoning) + tool results
+    apiInput.push(...response.output as unknown as Record<string, unknown>[]);
+    apiInput.push(...toolResults);
   }
 
   const sideEffects = extractSideEffectsFromExecutor(allExecResults);
-  let text = finalTextParts.length > 0 ? finalTextParts.join('\n') : null;
+  let text = finalText.length > 0 ? finalText : null;
+
+  const usedWebSearch = allToolTraces.some((trace) => trace.name === 'web_search');
+  if (text && usedWebSearch) {
+    text = stripLinksFromText(text);
+  }
 
   const commitToolNames = new Set(['email_send', 'calendar_write']);
   for (const exec of allExecResults) {
@@ -212,6 +435,10 @@ export async function runAgentLoop(
       { role: 'user', content: context.messageContent },
     ],
     availableToolNames: availableTools.map(t => t.name),
+    effectiveModel,
+    roundTraces,
+    promptComposeMs,
+    toolFilterMs,
   };
 }
 
@@ -242,8 +469,21 @@ function summariseToolDetail(name: string, input: Record<string, unknown>): stri
       const to = Array.isArray(input.to) ? (input.to as string[]).join(', ') : String(input.to ?? '');
       return `draft to: ${to.substring(0, 40)}`;
     }
+    case 'email_update_draft': {
+      const parts = [
+        input.subject ? `subject: ${(input.subject as string).substring(0, 40)}` : '',
+        input.to ? `to: ${String(input.to).substring(0, 40)}` : '',
+      ].filter(Boolean);
+      return parts.join(', ') || (input.draft_id as string)?.substring(0, 30);
+    }
     case 'email_send':
       return (input.draft_id as string)?.substring(0, 30);
+    case 'email_cancel_draft':
+      return (input.draft_id as string)?.substring(0, 30);
+    case 'travel_time':
+      return `${input.origin ?? '?'} → ${input.destination ?? '?'} (${input.mode ?? 'driving'})`;
+    case 'places_search':
+      return (input.query as string)?.substring(0, 60) ?? `detail: ${(input.place_id as string)?.substring(0, 30)}`;
     case 'web_search':
       return undefined;
     default:

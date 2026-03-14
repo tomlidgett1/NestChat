@@ -1,6 +1,13 @@
 import type { TurnInput, AgentLoopResult, TurnTrace } from './types.ts';
 import { MEMORY_V2_ENABLED } from '../env.ts';
 
+const SEPARATOR_RE = /\n---\n|\n---$|^---\n|\s+---\s+|\s+---$|^---\s+/;
+function splitBubbles(text: string): string[] {
+  const hasSeparator = text.includes('---');
+  const parts = hasSeparator ? text.split(SEPARATOR_RE) : [text];
+  return parts.map(p => p.trim()).filter(Boolean);
+}
+
 export async function persistTurn(
   input: TurnInput,
   loopResult: AgentLoopResult,
@@ -9,11 +16,7 @@ export async function persistTurn(
   const { addMessage, insertToolTrace } = await import('../state.ts');
 
   if (loopResult.text) {
-    const historyMessage = loopResult.text
-      .split('---')
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .join(' ');
+    const historyMessage = splitBubbles(loopResult.text).join(' ');
 
     const messageMetadata = loopResult.toolsUsed.length > 0
       ? { tools_used: loopResult.toolsUsed }
@@ -101,6 +104,15 @@ async function persistTurnTrace(trace: TurnTrace): Promise<void> {
     system_prompt: trace.systemPrompt,
     initial_messages: trace.initialMessages,
     available_tool_names: trace.availableToolNames,
+
+    context_sub_timings: trace.contextSubTimings,
+    round_traces: trace.roundTraces,
+    prompt_compose_ms: trace.promptComposeMs,
+    tool_filter_ms: trace.toolFilterMs,
+    router_context_ms: trace.routerContextMs,
+
+    context_path: trace.contextPath ?? 'full',
+    pending_action_debug: trace.pendingActionDebug ?? {},
 
     error_message: trace.errorMessage ?? null,
     error_stage: trace.errorStage ?? null,

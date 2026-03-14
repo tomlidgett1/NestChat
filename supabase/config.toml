@@ -36,5 +36,8 @@ verify_jwt = false
 [functions.ingest-cron]
 verify_jwt = false
 
+[functions.granola-auth]
+verify_jwt = false
+
 [functions.debug-dashboard]
 verify_jwt = false

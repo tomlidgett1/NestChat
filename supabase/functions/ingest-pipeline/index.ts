@@ -24,9 +24,12 @@ import {
   sentenceAwareChunks,
   buildEmailSummary,
   buildCalendarSummary,
+  buildMeetingSummary,
   contentHash,
   emailContextHeader,
   calendarContextHeader,
+  meetingContextHeader,
+  transcriptContextHeader,
 } from '../_shared/chunker.ts';
 import { embedChunks, type ChunkToEmbed, truncateForEmbedding } from '../_shared/embedder.ts';
 import { softDeleteSource, bulkDeleteSources, bulkCheckNeedsUpdate, insertEmbeddedChunks, sourceNeedsUpdate } from '../_shared/ingestion-helpers.ts';
@@ -260,8 +263,23 @@ async function createJobAndSeedTasks(
     });
   }
 
+  if (sources.includes('granola')) {
+    const granolaAccounts = await getGranolaAccounts(supabase, authUserId);
+    for (const acct of granolaAccounts) {
+      tasks.push({
+        job_id: jobId, handle, auth_user_id: authUserId,
+        task_type: 'granola',
+        params: { mode, account_email: acct.email },
+      });
+    }
+  }
+
   if (tasks.length > 0) {
-    await supabase.from('ingestion_tasks').insert(tasks);
+    const { error: insertErr } = await supabase.from('ingestion_tasks').insert(tasks);
+    if (insertErr) {
+      console.error(`[ingest-pipeline] Task insert failed: ${insertErr.message}`, insertErr);
+      throw new Error(`Task insert failed: ${insertErr.message}`);
+    }
   }
 
   console.log(`[ingest-pipeline] Job ${jobId}: seeded ${tasks.length} tasks (${sources.join(', ')})`);
@@ -325,6 +343,8 @@ async function executeTask(supabase: SupabaseClient, task: TaskRow): Promise<Tas
       return executeEmailsTask(supabase, task);
     case 'calendar':
       return executeCalendarTask(supabase, task);
+    case 'granola':
+      return executeGranolaTask(supabase, task);
     case 'transcript':
       console.log('[ingest-pipeline] Transcript task: placeholder (no-op)');
       return { documents: 0, chunks: 0, embeddings: 0, skipped: 0 };
@@ -676,6 +696,157 @@ async function executeCalendarTask(
   };
 }
 
+// ── Granola Task ──────────────────────────────────────────────
+
+const GRANOLA_PAGE_SIZE = 20;
+
+async function executeGranolaTask(
+  supabase: SupabaseClient,
+  task: TaskRow,
+): Promise<TaskResult> {
+  const { mode = 'full', account_email, offset = 0 } = task.params;
+  const handle = task.handle;
+  const authUserId = task.auth_user_id;
+
+  const { fetchAllGranolaMeetings } = await import('../_shared/granola-fetcher.ts');
+
+  const afterDate = mode === 'incremental'
+    ? new Date(Date.now() - 7 * 86400_000).toISOString()
+    : undefined;
+
+  const maxMeetings = mode === 'incremental' ? 50 : 500;
+  const meetings = await fetchAllGranolaMeetings(authUserId, { maxMeetings, afterDate });
+
+  const slice = meetings.slice(offset, offset + GRANOLA_PAGE_SIZE);
+
+  console.log(
+    `[ingest-pipeline] Granola: ${account_email ?? 'default'}, offset=${offset}, ` +
+    `total=${meetings.length}, page=${slice.length}`,
+  );
+
+  const meetingHashes = slice.map((m) => ({
+    sourceId: `granola:${m.id}`,
+    contentHash: contentHash('meeting_summary', `granola:${m.id}`, 'summary'),
+  }));
+
+  const needsUpdate = await bulkCheckNeedsUpdate(supabase, handle, 'meeting_summary', meetingHashes);
+  const meetingsToProcess = slice.filter((m) => needsUpdate.has(`granola:${m.id}`));
+  const skipped = slice.length - meetingsToProcess.length;
+
+  const idsToDelete = meetingsToProcess.map((m) => `granola:${m.id}`);
+  await Promise.all([
+    bulkDeleteSources(supabase, handle, 'meeting_summary', idsToDelete),
+    bulkDeleteSources(supabase, handle, 'meeting_chunk', idsToDelete),
+    bulkDeleteSources(supabase, handle, 'utterance_chunk', idsToDelete),
+  ]);
+
+  const allChunks: ChunkToEmbed[] = [];
+  let docCount = 0;
+
+  for (const meeting of meetingsToProcess) {
+    const sourceId = `granola:${meeting.id}`;
+    const hash = meetingHashes.find((h) => h.sourceId === sourceId)!.contentHash;
+
+    const contextHdr = meetingContextHeader(
+      meeting.title,
+      meeting.attendees,
+      meeting.date,
+    );
+
+    const summary = buildMeetingSummary(meeting.notes, meeting.enhancedNotes);
+
+    allChunks.push({
+      text: truncateForEmbedding(`${contextHdr}\n---\n${summary}`),
+      sourceType: 'meeting_summary',
+      sourceId,
+      title: meeting.title,
+      chunkIndex: 0,
+      contentHash: hash,
+      metadata: {
+        attendees: meeting.attendees.slice(0, 15),
+        meeting_date: meeting.date,
+        account: account_email ?? 'granola',
+        provider: 'granola',
+        granola_meeting_id: meeting.id,
+      },
+    });
+
+    const notesBody = [meeting.notes, meeting.enhancedNotes].filter(Boolean).join('\n\n');
+    if (notesBody.length > 50) {
+      const noteChunks = sentenceAwareChunks(notesBody, contextHdr);
+      for (let i = 0; i < noteChunks.length; i++) {
+        allChunks.push({
+          text: truncateForEmbedding(noteChunks[i]),
+          sourceType: 'meeting_chunk',
+          sourceId,
+          title: meeting.title,
+          chunkIndex: i + 1,
+          contentHash: contentHash('meeting_chunk', sourceId, 'chunk', i),
+          parentSourceId: sourceId,
+          metadata: {
+            attendees: meeting.attendees.slice(0, 15),
+            meeting_date: meeting.date,
+            provider: 'granola',
+          },
+        });
+      }
+    }
+
+    if (meeting.transcript && meeting.transcript.length > 50) {
+      const txHdr = transcriptContextHeader(
+        meeting.title,
+        meeting.attendees,
+        meeting.date,
+      );
+      const txChunks = sentenceAwareChunks(meeting.transcript, txHdr);
+      for (let i = 0; i < txChunks.length; i++) {
+        allChunks.push({
+          text: truncateForEmbedding(txChunks[i]),
+          sourceType: 'utterance_chunk',
+          sourceId,
+          title: `Transcript: ${meeting.title}`,
+          chunkIndex: i + 100,
+          contentHash: contentHash('utterance_chunk', sourceId, 'chunk', i),
+          parentSourceId: sourceId,
+          metadata: {
+            attendees: meeting.attendees.slice(0, 15),
+            meeting_date: meeting.date,
+            provider: 'granola',
+          },
+        });
+      }
+    }
+
+    docCount++;
+  }
+
+  console.log(
+    `[ingest-pipeline] Granola page: ${allChunks.length} chunks from ${docCount} meetings (${skipped} skipped)`,
+  );
+
+  const SUB_BATCH = 25;
+  let totalEmbeddings = 0;
+
+  for (let i = 0; i < allChunks.length; i += SUB_BATCH) {
+    const batch = allChunks.slice(i, i + SUB_BATCH);
+    const embedded = await embedChunks(batch);
+    const { inserted } = await insertEmbeddedChunks(supabase, handle, embedded);
+    totalEmbeddings += inserted;
+  }
+
+  const nextOffset = offset + slice.length;
+  const hasMore = nextOffset < meetings.length;
+
+  return {
+    documents: docCount,
+    chunks: allChunks.length,
+    embeddings: totalEmbeddings,
+    skipped,
+    has_more: hasMore,
+    next_offset: hasMore ? nextOffset : undefined,
+  };
+}
+
 // ── Handle -> auth_user_id resolution ─────────────────────────
 
 async function resolveAuthUserId(supabase: SupabaseClient, handle: string): Promise<string | null> {
@@ -709,6 +880,23 @@ async function getMicrosoftAccounts(
     .eq('user_id', authUserId);
 
   return (data ?? []).map((a: any) => ({ id: a.id, email: a.microsoft_email }));
+}
+
+async function getGranolaAccounts(
+  supabase: SupabaseClient,
+  authUserId: string,
+): Promise<Array<{ id: string; email: string }>> {
+  const { data, error } = await supabase
+    .from('user_granola_accounts')
+    .select('id, granola_email')
+    .eq('user_id', authUserId);
+
+  if (error) {
+    console.error(`[ingest-pipeline] getGranolaAccounts error:`, error.message);
+    return [];
+  }
+
+  return (data ?? []).map((a: any) => ({ id: a.id, email: a.granola_email }));
 }
 
 // ── Progress + Finalisation ───────────────────────────────────

@@ -129,9 +129,54 @@ export async function getAllGoogleTokens(userId: string): Promise<TokenResult[]>
     }),
   );
 
-  return results
-    .filter((r): r is PromiseFulfilledResult<TokenResult> => r.status === 'fulfilled')
-    .map((r) => r.value);
+  const fulfilled: TokenResult[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      fulfilled.push(r.value);
+    } else {
+      console.error(`[token-broker] refresh failed for ${accounts[i].google_email}: ${r.reason}`);
+    }
+  }
+  return fulfilled;
+}
+
+// ── Granola ──
+
+export interface GranolaTokenResult {
+  accessToken: string;
+  email: string;
+  accountId: string;
+}
+
+export async function getGranolaAccessToken(
+  userId: string,
+  options?: TokenOptions,
+): Promise<GranolaTokenResult> {
+  const supabase = getAdminClient();
+
+  let query = supabase
+    .from('user_granola_accounts')
+    .select('id, granola_email, access_token, refresh_token, token_expires_at');
+
+  if (options?.accountId) {
+    query = query.eq('id', options.accountId).eq('user_id', userId);
+  } else if (options?.email) {
+    query = query.eq('granola_email', options.email).eq('user_id', userId);
+  } else {
+    query = query.eq('user_id', userId).eq('is_primary', true);
+  }
+
+  const { data: account, error } = await query.maybeSingle();
+
+  if (error) throw new Error(`Token broker: ${error.message}`);
+  if (!account) throw new Error('No Granola account found');
+
+  return {
+    accessToken: account.access_token,
+    email: account.granola_email,
+    accountId: account.id,
+  };
 }
 
 // ── Microsoft ──

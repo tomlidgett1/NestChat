@@ -7,8 +7,9 @@ import type {
   UserProfile,
   ConnectedAccount,
   NestUser,
+  PendingEmailSendAction,
 } from '../state.ts';
-import type Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
+import type { InputMessage, InputContentPart, ModelTier } from '../ai/models.ts';
 
 // ═══════════════════════════════════════════════════════════════
 // Agent taxonomy
@@ -21,7 +22,9 @@ export type AgentName =
   | 'recall'
   | 'operator'
   | 'onboard'
-  | 'meeting_prep';
+  | 'meeting_prep'
+  | 'chat'
+  | 'smart';
 
 // ═══════════════════════════════════════════════════════════════
 // Tool namespaces & side-effect classification
@@ -35,14 +38,59 @@ export type ToolNamespace =
   | 'calendar.read'
   | 'calendar.write'
   | 'contacts.read'
+  | 'granola.read'
   | 'web.search'
   | 'knowledge.search'
   | 'messaging.react'
   | 'messaging.effect'
   | 'media.generate'
+  | 'travel.search'
   | 'admin.internal';
 
 export type SideEffect = 'read' | 'draft' | 'commit';
+
+// ═══════════════════════════════════════════════════════════════
+// Option A: Domain classification & capability-based routing
+// ═══════════════════════════════════════════════════════════════
+
+export type DomainTag =
+  | 'email'
+  | 'calendar'
+  | 'meeting_prep'
+  | 'research'
+  | 'recall'
+  | 'contacts'
+  | 'general';
+
+export type Capability =
+  | 'email.read'
+  | 'email.write'
+  | 'calendar.read'
+  | 'calendar.write'
+  | 'contacts.read'
+  | 'granola.read'
+  | 'web.search'
+  | 'knowledge.search'
+  | 'memory.read'
+  | 'memory.write'
+  | 'travel.search'
+  | 'deep_profile';
+
+export type MemoryDepth = 'none' | 'light' | 'full';
+
+export interface ClassifierResult {
+  mode: 'chat' | 'smart';
+  primaryDomain: DomainTag;
+  secondaryDomains?: DomainTag[];
+  confidence: number;
+  requiredCapabilities: Capability[];
+  preferredCapabilities?: Capability[];
+  memoryDepth: MemoryDepth;
+  requiresToolUse: boolean;
+  isConfirmation: boolean;
+  pendingActionId?: string | null;
+  style: UserStyle;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Prompt composition
@@ -69,6 +117,17 @@ export interface RouteDecision {
   confidence: number;
   fastPathUsed: boolean;
   routerLatencyMs: number;
+  modelTierOverride?: import('../ai/models.ts').ModelTier;
+  confirmationState?: 'confirmed' | 'not_confirmation' | 'not_checked';
+  // Option A fields (backwards-compatible)
+  primaryDomain?: DomainTag;
+  secondaryDomains?: DomainTag[];
+  classifierResult?: ClassifierResult;
+  memoryDepth?: MemoryDepth;
+  forcedToolChoice?: string;
+  routeLayer?: '0A' | '0B' | '0C';
+  reasoningEffortOverride?: import('../ai/models.ts').ReasoningEffort;
+  modelOverride?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -146,8 +205,8 @@ export interface TurnInput {
 
 export interface TurnContext {
   history: StoredMessage[];
-  formattedHistory: Anthropic.MessageParam[];
-  messageContent: Anthropic.ContentBlockParam[];
+  formattedHistory: InputMessage[];
+  messageContent: InputContentPart[];
   recentTurns: Array<{ role: string; content: string }>;
   memoryItems: MemoryItem[];
   summaries: ConversationSummary[];
@@ -159,6 +218,8 @@ export interface TurnContext {
   transcriptions: string[];
   transcriptionFailed: boolean;
   workingMemory: WorkingMemory;
+  pendingEmailSend: PendingEmailSendAction | null;
+  pendingEmailSends: PendingEmailSendAction[];
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -175,8 +236,8 @@ export interface AgentConfig {
   name: AgentName;
   instructions: string;
   toolPolicy: ToolPolicy;
-  model: string;
-  maxTokens: number;
+  modelTier: ModelTier;
+  maxOutputTokens: number;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -192,6 +253,23 @@ export interface RememberedUser {
 export interface GeneratedImage {
   url: string;
   prompt: string;
+}
+
+export interface RoundTrace {
+  round: number;
+  apiLatencyMs: number;
+  toolExecLatencyMs: number;
+  totalRoundMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  status: string;
+  functionCallCount: number;
+  webSearchCalled: boolean;
+  textLength: number;
+  wasRetry: boolean;
+  retryReason?: string;
+  maxOutputTokens: number;
+  reasoningEffort?: string;
 }
 
 export interface AgentLoopResult {
@@ -210,6 +288,10 @@ export interface AgentLoopResult {
   systemPrompt: string;
   initialMessages: Array<{ role: string; content: unknown }>;
   availableToolNames: string[];
+  effectiveModel: string;
+  roundTraces: RoundTrace[];
+  promptComposeMs: number;
+  toolFilterMs: number;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -225,12 +307,39 @@ export interface ToolCallTrace {
   inputSummary?: string;
   approvalGranted?: boolean;
   approvalMethod?: 'explicit' | 'implicit' | 'exempt';
+  pendingActionId?: number;
+  sendResolutionSource?: 'model_input' | 'pending_action' | 'pending_action_validated' | 'none';
+  pendingActionFailureReason?: string;
 }
 
 export interface ToolCallBlockedTrace {
   name: string;
   namespace: ToolNamespace;
   reason: 'namespace_denied' | 'side_effect_denied' | 'rate_limited';
+  detail?: string;
+  pendingActionId?: number;
+}
+
+export interface PendingActionDebug {
+  pendingEmailSendCount: number;
+  pendingEmailSendId: number | null;
+  pendingEmailSendStatus: string | null;
+  draftIdPresent: boolean;
+  accountPresent: boolean;
+  confirmationResult: 'confirmed' | 'not_confirmation' | 'not_checked';
+}
+
+export interface ContextSubTimings {
+  historyMs: number;
+  memoryMs: number;
+  summariesMs: number;
+  toolTracesMs: number;
+  profileMs: number;
+  accountsMs: number;
+  messageContentMs: number;
+  ragMs: number;
+  workingMemoryMs: number;
+  formatHistoryMs: number;
 }
 
 export interface TurnTrace {
@@ -245,6 +354,10 @@ export interface TurnTrace {
 
   // Routing
   routeDecision: RouteDecision;
+  // Option A observability
+  classifierResult?: ClassifierResult;
+  routeLayer?: '0A' | '0B' | '0C';
+  classifierLatencyMs?: number;
 
   // Context
   systemPromptLength: number;
@@ -255,12 +368,18 @@ export interface TurnTrace {
   connectedAccountsCount: number;
   historyMessagesCount: number;
   contextBuildLatencyMs: number;
+  contextSubTimings: ContextSubTimings | null;
 
   // Agent
   agentName: AgentName;
   modelUsed: string;
   agentLoopRounds: number;
   agentLoopLatencyMs: number;
+
+  // Per-round detail
+  roundTraces: RoundTrace[];
+  promptComposeMs: number;
+  toolFilterMs: number;
 
   // Tools
   toolCalls: ToolCallTrace[];
@@ -278,6 +397,9 @@ export interface TurnTrace {
 
   // Overall
   totalLatencyMs: number;
+  routerContextMs: number;
+  contextPath: 'full' | 'light' | 'memory-light';
+  pendingActionDebug: PendingActionDebug;
 
   // Full prompt context (for debug dashboard)
   systemPrompt: string | null;

@@ -1,6 +1,8 @@
-import type { AgentConfig, TurnContext, TurnInput, MemoryItem, ConversationSummary, ToolTrace, ConnectedAccount } from '../orchestrator/types.ts';
-import { IDENTITY_LAYER } from './base-instructions.ts';
+import type { AgentConfig, TurnContext, TurnInput, MemoryItem, ConversationSummary, ToolTrace, ConnectedAccount, DomainTag, Capability } from '../orchestrator/types.ts';
+import { IDENTITY_LAYER, ONBOARDING_IDENTITY_LAYER } from './base-instructions.ts';
+import { getDomainInstructions, getAuxiliaryInstructions, getDeepProfileInstructions, getTravelInstructions } from './domain-instructions.ts';
 import { formatRelativeTime } from '../utils/format.ts';
+import { getOptionalEnv } from '../env.ts';
 
 // ═══════════════════════════════════════════════════════════════
 // Token budget helpers
@@ -137,7 +139,10 @@ function humaniseScopes(scopes: string[]): string[] {
 // Layer 1: Identity — who Nest is (shared across all agents)
 // ═══════════════════════════════════════════════════════════════
 
-function buildIdentityLayer(): string {
+function buildIdentityLayer(agent: AgentConfig, input: TurnInput): string {
+  if (agent.name === 'onboard' && input.isOnboarding) {
+    return ONBOARDING_IDENTITY_LAYER;
+  }
   return IDENTITY_LAYER;
 }
 
@@ -194,12 +199,25 @@ function buildContextLayer(context: TurnContext, input: TurnInput): string {
       const label = acct.provider.charAt(0).toUpperCase() + acct.provider.slice(1);
       const primaryTag = acct.isPrimary ? ' (primary)' : '';
       const nameTag = acct.name ? `, ${acct.name}` : '';
-      const scopeSummary = acct.scopes.length > 0
-        ? ` [${humaniseScopes(acct.scopes).join(', ')}]`
-        : '';
+      const scopeLabels = acct.scopes.length > 0
+        ? humaniseScopes(acct.scopes)
+        : acct.provider === 'microsoft'
+          ? ['email', 'calendar', 'contacts']
+          : [];
+      const scopeSummary = scopeLabels.length > 0 ? ` [${scopeLabels.join(', ')}]` : '';
       acctBlock += `\n${label}${primaryTag}: ${acct.email}${nameTag}${scopeSummary}`;
     }
     acctBlock += `\nYou know which accounts are connected. Answer naturally if asked, don't say "let me check".`;
+
+    const hasGranola = context.connectedAccounts.some(a => a.provider === 'granola');
+    if (!hasGranola && input.authUserId) {
+      const supabaseUrl = getOptionalEnv('SUPABASE_URL') ?? 'https://oypzijwqmkxktvgtsqkp.supabase.co';
+      const granolaAuthUrl = `${supabaseUrl}/functions/v1/granola-auth?user_id=${input.authUserId}`;
+      acctBlock += `\n\nGranola (meeting notes) is NOT connected. If the user asks to connect Granola, send them this link:\n\n${granolaAuthUrl}\n\nPut the link on its own line. Frame it as a quick tap to connect their meeting notes. Do NOT pretend you can connect it yourself or that you're "setting it up". Just give them the link and tell them to tap it.`;
+    } else if (!hasGranola) {
+      acctBlock += `\n\nGranola (meeting notes) is NOT connected. If the user asks to connect Granola, tell them you need to look up their connection link and to ask again shortly.`;
+    }
+
     sections.push(acctBlock);
   }
 
@@ -211,6 +229,14 @@ function buildContextLayer(context: TurnContext, input: TurnInput): string {
   // Tool traces
   if (context.toolTraces.length > 0) {
     sections.push(`Recent tool usage\n${formatToolTracesForPrompt(context.toolTraces)}`);
+  }
+
+  if (context.pendingEmailSends.length > 0) {
+    const draft = context.pendingEmailSends[0];
+    const to = draft.to.join(', ') || 'unknown recipient';
+    const subject = draft.subject ?? 'no subject';
+    const draftId = String(draft.id);
+    sections.push(`PENDING EMAIL DRAFT (draft_id: ${draftId})\nTo: ${to}\nSubject: ${subject}\nStatus: awaiting user approval\n\nRULES:\n1. If the user confirms (e.g. "yes", "send it", "go ahead"), call email_send with draft_id "${draftId}".\n2. If the user asks to revise, call email_update_draft with draft_id "${draftId}" and the changes.\n3. If the user cancels, call email_cancel_draft with draft_id "${draftId}".\n4. Do NOT call email_draft again. The draft already exists.\n5. Do NOT invent a pending draft if none exists.`);
   }
 
   // RAG evidence
@@ -374,27 +400,24 @@ WEDGE: organise`;
       break;
     case 'referral_opener':
       strategy = `ENTRY STATE: Referral. Someone told them about you.
-STRATEGY: Acknowledge warmly ("love that"). Keep it brief. ${classification.shouldAskName ? 'Ask their name.' : ''} Give a sense of what you do in one line, not a list.
+STRATEGY: Acknowledge warmly ("love that"). Keep it brief. ${classification.shouldAskName ? 'Ask their name.' : ''} Then extract: ask one curious question to learn something real about them ("what's keeping you busy at the moment?" or "what's the thing you keep meaning to sort out?"). Once they answer, show value against that specific thing.
 WEDGE: ask_plan`;
       break;
     case 'trust_opener':
       strategy = `ENTRY STATE: Trust/skepticism. They want to know who you are or if this is legit.
-STRATEGY: Be brief and reassuring. "I'm Nest, a personal assistant you text. I keep things simple and low-noise. You can use me when you need me, ignore me when you don't." Then steer toward usefulness.
+STRATEGY: Be brief and reassuring. "I'm Nest, a personal assistant you text. I keep things simple and low-noise. You can use me when you need me, ignore me when you don't." Then steer toward extraction: ask one question that gets them to share something real so you can demonstrate value contextually.
 Do NOT be defensive. Do NOT use policy language. Do NOT mention technology, models, or infrastructure. NEVER say you are AI or a bot.
 ${classification.includeTrustReassurance ? 'Include a trust reassurance line.' : ''}
 WEDGE: ask_plan`;
       break;
     case 'curious_opener':
       strategy = `ENTRY STATE: Curious opener (hi, hello, what is this).
-STRATEGY: ${nameVariant === 'name_first'
-        ? 'Brief intro, then ask their name. After they reply, show what you can do through a natural prompt.'
-        : 'Brief intro. Show what you do through a natural prompt, not a feature list. Ask their name naturally.'}
-Make all three wedges discoverable without a menu: remembering things, drafting messages, sorting out a messy week.
+STRATEGY: Brief cheeky intro, then extract. Ask ONE intriguing question that pulls something real out of them. Not "how can I help" but something like "what's the one thing on your plate you keep putting off?" or "tell me something about your week." The goal is to get a real detail so the next reply can show tailored value, not a feature list.
 WEDGE: ask_plan`;
       break;
     default:
       strategy = `ENTRY STATE: Ambiguous. The message is unclear.
-STRATEGY: Be warm and brief. If you can infer intent, help. If not, keep it simple: "I'm Nest, a personal assistant you text. What's on your mind?"
+STRATEGY: Be warm and brief. Ask one curious extraction question to learn something real about them: "tell me one thing on your mind right now" or "what's your week looking like?" Then use their answer to show contextual value.
 WEDGE: ask_plan`;
   }
 
@@ -423,7 +446,21 @@ function buildOnboardingLayer(input: TurnInput): string {
   sections.push(`Onboarding Context\nThis is a NEW user who hasn't verified yet. Your only job: be useful immediately. Earn trust fast.`);
 
   if (isFirstMessage) {
-    sections.push(`First Message Guidance\nThis is the user's very first message to Nest. Be warm, brief, and immediately useful. Do not ask what they need help with if they've already told you. Respond to what they said. Keep it under 30 words per bubble. Do not pitch features.`);
+    sections.push(`First Message Guidance
+This is the user's very first message to Nest.
+Your opener must be unusually engaging. It should feel interesting straight away, not generic or polite-by-default.
+Lead with a sharp, slightly cheeky line that creates curiosity or momentum, then respond directly to what they said.
+Do NOT open with "hey", "hi", "how can I help?", "what can I do for you?", or anything that sounds like support.
+Keep it under 30 words per bubble.
+Do not pitch features.
+
+EXTRACTION: Your opener MUST end with one intriguing question that pulls something real out of them. Not "how can I help" but something specific and curious like:
+- "What's the one thing on your plate you keep putting off?"
+- "Tell me something about your week so far."
+- "What's taking up too much of your headspace lately?"
+- "Give me the messiest thing on your to-do list right now."
+Pick one that fits the energy of their message. If they already told you something specific, skip the question and show value immediately.
+The goal: get one real detail so you can show them exactly how you help with THEIR life, not a generic demo.`);
   }
 
   if (pdlContext) {
@@ -460,6 +497,77 @@ function buildOnboardingLayer(input: TurnInput): string {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Compact prompt — for acknowledgement/casual fast-path messages
+// Dramatically reduces token count for simple responses
+// ═══════════════════════════════════════════════════════════════
+
+const COMPACT_IDENTITY = `You are Nest, a personal assistant people text. You are texting over iMessage. Keep responses short and casual. You MUST include the literal delimiter --- on its own line between separate text bubbles. Line breaks alone do NOT create bubbles, only --- does. Australian spelling. Never mention AI, tools, or technology. Never narrate what you're doing.`;
+
+export function composeCompactPrompt(
+  context: TurnContext,
+  input: TurnInput,
+): string {
+  const sections: string[] = [COMPACT_IDENTITY];
+
+  if (input.senderHandle && context.senderProfile?.name) {
+    sections.push(`User: ${context.senderProfile.name} (${input.senderHandle})`);
+  } else if (input.senderHandle) {
+    sections.push(`User handle: ${input.senderHandle}`);
+  }
+
+  if (context.connectedAccounts.length > 0) {
+    let acctBlock = `Connected accounts`;
+    for (const acct of context.connectedAccounts) {
+      const label = acct.provider.charAt(0).toUpperCase() + acct.provider.slice(1);
+      const primaryTag = acct.isPrimary ? ' (primary)' : '';
+      acctBlock += `\n${label}${primaryTag}: ${acct.email}`;
+    }
+    acctBlock += `\nAnswer naturally if asked about connected accounts.`;
+    sections.push(acctBlock);
+  }
+
+  const now = new Date();
+  const tz = input.timezone ?? 'Australia/Sydney';
+  try {
+    const timeStr = now.toLocaleString('en-AU', {
+      timeZone: tz, weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true,
+    });
+    sections.push(`Now: ${timeStr}`);
+  } catch { /* skip */ }
+
+  return sections.join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Domain block builder — for Option A Smart Agent prompt composition
+// ═══════════════════════════════════════════════════════════════
+
+function buildDomainLayers(primaryDomain: DomainTag, secondaryDomains?: DomainTag[], capabilities?: Capability[]): string {
+  const sections: string[] = [];
+
+  sections.push(getDomainInstructions(primaryDomain));
+
+  if (capabilities?.includes('deep_profile')) {
+    sections.push(getDeepProfileInstructions());
+  }
+
+  if (capabilities?.includes('travel.search')) {
+    sections.push(getTravelInstructions());
+  }
+
+  if (secondaryDomains && secondaryDomains.length > 0) {
+    const auxBlocks = secondaryDomains
+      .filter(d => d !== primaryDomain)
+      .map(d => getAuxiliaryInstructions(d));
+    if (auxBlocks.length > 0) {
+      sections.push(`## Additional Context\n${auxBlocks.join('\n')}`);
+    }
+  }
+
+  return sections.join('\n\n');
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Main composer — assembles all four layers
 // ═══════════════════════════════════════════════════════════════
 
@@ -467,13 +575,26 @@ export function composePrompt(
   agent: AgentConfig,
   context: TurnContext,
   input: TurnInput,
+  primaryDomain?: DomainTag,
+  secondaryDomains?: DomainTag[],
+  capabilities?: Capability[],
 ): string {
   const layers = [
-    buildIdentityLayer(),
+    buildIdentityLayer(agent, input),
     buildAgentLayer(agent),
-    buildContextLayer(context, input),
-    buildTurnLayer(input, context),
   ];
+
+  if (primaryDomain && agent.name === 'smart') {
+    layers.push(buildDomainLayers(primaryDomain, secondaryDomains, capabilities));
+  }
+
+  // Inject travel instructions for non-smart agents that have travel tools
+  if (agent.name !== 'smart' && agent.toolPolicy?.allowedNamespaces?.includes('travel.search')) {
+    layers.push(getTravelInstructions());
+  }
+
+  layers.push(buildContextLayer(context, input));
+  layers.push(buildTurnLayer(input, context));
 
   if (input.isOnboarding) {
     layers.push(buildOnboardingLayer(input));

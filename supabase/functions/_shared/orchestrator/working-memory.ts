@@ -1,5 +1,6 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.78.0';
-import type { WorkingMemory, AgentLoopResult } from './types.ts';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from '../ai/models.ts';
+import type { WorkingMemory } from './types.ts';
+import type { PendingEmailSendAction } from '../state.ts';
 
 const EXTRACTION_PROMPT = `Extract structured working memory from this conversation turn. Return ONLY valid JSON:
 {
@@ -22,9 +23,10 @@ export async function extractWorkingMemory(
   assistantResponse: string | null,
   toolsUsed: Array<{ tool: string; detail?: string }>,
   previousMemory: WorkingMemory,
+  pendingEmailSends: PendingEmailSendAction[] = [],
 ): Promise<WorkingMemory> {
   try {
-    const client = new Anthropic({ apiKey: Deno.env.get('ANTHROPIC_API_KEY') });
+    const client = getOpenAIClient();
 
     const turnSummary = [
       `User: ${userMessage.substring(0, 200)}`,
@@ -34,28 +36,36 @@ export async function extractWorkingMemory(
       previousMemory.pendingActions.length > 0 ? `Previous pending: ${previousMemory.pendingActions.map(a => a.description).join(', ')}` : '',
     ].filter(Boolean).join('\n');
 
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 200,
-      system: EXTRACTION_PROMPT,
-      messages: [{ role: 'user', content: turnSummary }],
-    });
+    const response = await client.responses.create({
+      model: MODEL_MAP.orchestration,
+      instructions: EXTRACTION_PROMPT,
+      input: turnSummary,
+      max_output_tokens: 1024,
+      store: false,
+      reasoning: { effort: REASONING_EFFORT.orchestration },
+    } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map(b => b.text)
-      .join('');
+    const text = response.output_text;
+    if (!text) return previousMemory;
 
     const parsed = JSON.parse(text);
+
+    const llmPendingActions = (parsed.pending_actions ?? []).slice(0, 5).map((a: Record<string, string>) => ({
+      type: a.type ?? 'unknown',
+      description: a.description ?? '',
+      createdTurnId: '',
+    }));
+    const nonEmailPendingActions = llmPendingActions.filter((a) => !/^(email_draft|email_send|draft)$/i.test(a.type));
+    const durableEmailPendingActions = pendingEmailSends.map((action) => ({
+      type: 'email_send',
+      description: `Send draft to ${action.to.join(', ') || 'recipient'}${action.subject ? ` (${action.subject})` : ''}`,
+      createdTurnId: action.sourceTurnId ?? '',
+    }));
 
     return {
       activeTopics: (parsed.active_topics ?? []).slice(0, 5),
       unresolvedReferences: (parsed.unresolved_references ?? []).slice(0, 5),
-      pendingActions: (parsed.pending_actions ?? []).slice(0, 5).map((a: Record<string, string>) => ({
-        type: a.type ?? 'unknown',
-        description: a.description ?? '',
-        createdTurnId: '',
-      })),
+      pendingActions: [...nonEmailPendingActions, ...durableEmailPendingActions].slice(0, 5),
       lastEntityMentioned: parsed.last_entity_mentioned ?? null,
     };
   } catch (err) {

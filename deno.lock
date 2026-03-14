@@ -9,6 +9,7 @@
     "npm:@types/node@22": "22.19.15",
     "npm:dotenv@^17.2.3": "17.3.1",
     "npm:express@^4.21.0": "4.22.1",
+    "npm:openai@6.27.0": "6.27.0",
     "npm:openai@^6.16.0": "6.27.0",
     "npm:tsx@^4.19.0": "4.21.0",
     "npm:typescript@^5.6.0": "5.9.3"
