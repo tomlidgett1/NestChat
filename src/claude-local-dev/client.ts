@@ -81,6 +81,8 @@ places_search: "good coffee near X", "best restaurant in X", "phone number for X
 
 Lead with the key answer (duration, next departure). For transit: include line name, departure time, stops, fare. For places: lead with name and rating, include address and open/closed status. Use **bold** for place names. If tools fail, use web_search as fallback.
 
+NEVER use compass directions (north, south, east, west) when giving directions — most people dont know which way north is. Use landmarks, street names, and turns instead.
+
 ## Reactions
 You can react to messages using iMessage reactions, but TEXT RESPONSES ARE PREFERRED.
 
@@ -320,6 +322,24 @@ const DRIVE_FIELD_MASK = [
 
 const MODE_MAP: Record<string, string> = { driving: 'DRIVE', walking: 'WALK', bicycling: 'BICYCLE', transit: 'TRANSIT' };
 
+// Direction simplifier — strips compass directions so anyone can follow
+const HEAD_TOWARD_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s+(on\s+.+?)\s*(toward\s+.+)?$/i;
+const HEAD_ON_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s+on\s+/i;
+const HEAD_COMPASS_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s*/i;
+
+function simplifyDirection(instruction: string): string {
+  if (!instruction) return instruction;
+  const headToward = instruction.match(HEAD_TOWARD_RE);
+  if (headToward) {
+    const onPart = headToward[2];
+    const towardPart = headToward[3] ?? '';
+    return `Start ${onPart}${towardPart ? ' ' + towardPart : ''}`.trim();
+  }
+  if (HEAD_ON_RE.test(instruction)) return instruction.replace(HEAD_ON_RE, 'Start on ');
+  if (HEAD_COMPASS_RE.test(instruction)) return instruction.replace(HEAD_COMPASS_RE, 'Go straight ').trim();
+  return instruction;
+}
+
 function mapsFetchWithTimeout(url: string, init?: RequestInit, timeoutMs = MAPS_FETCH_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -364,7 +384,7 @@ function parseTransitRoutesV2(routes: any[], origin: string, destination: string
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const step: any = { mode: s.travelMode === 'WALK' ? 'walking' : 'transit' };
       if (s.localizedValues) { step.distance = s.localizedValues.distance?.text; step.duration = s.localizedValues.staticDuration?.text; }
-      if (s.navigationInstruction?.instructions) step.instruction = s.navigationInstruction.instructions;
+      if (s.navigationInstruction?.instructions) step.instruction = simplifyDirection(s.navigationInstruction.instructions);
       if (s.transitDetails) {
         const td = s.transitDetails;
         const line = td.transitLine;
@@ -456,7 +476,7 @@ async function executeTravelTime(input: Record<string, unknown>): Promise<string
       if (!isNaN(depMs) && durationSec) result.estimated_arrival = new Date(depMs + durationSec * 1000).toISOString();
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const steps = (leg?.steps ?? []).slice(0, 5).map((s: any) => ({ instruction: s.navigationInstruction?.instructions, distance: s.localizedValues?.distance?.text, duration: s.localizedValues?.staticDuration?.text })).filter((s: any) => s.instruction);
+    const steps = (leg?.steps ?? []).slice(0, 5).map((s: any) => ({ instruction: simplifyDirection(s.navigationInstruction?.instructions ?? ''), distance: s.localizedValues?.distance?.text, duration: s.localizedValues?.staticDuration?.text })).filter((s: any) => s.instruction);
     if (steps.length) result.route_summary = steps;
     return JSON.stringify(result);
   } catch (e) {

@@ -1,8 +1,16 @@
-import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from '../ai/models.ts';
-import type { TurnInput, ClassifierResult, DomainTag, Capability, MemoryDepth, UserStyle } from './types.ts';
-import type { RouterContext } from './build-context.ts';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from "../ai/models.ts";
+import type {
+  Capability,
+  ClassifierResult,
+  DomainTag,
+  MemoryDepth,
+  TurnInput,
+  UserStyle,
+} from "./types.ts";
+import type { RouterContext } from "./build-context.ts";
 
-const CLASSIFIER_INSTRUCTIONS = `You are a routing classifier for Nest, a personal assistant people text over iMessage.
+const CLASSIFIER_INSTRUCTIONS =
+  `You are a routing classifier for Nest, a personal assistant people text over iMessage.
 
 Given the user's message, recent conversation context, and pending action state, output a JSON object that determines how the message should be handled.
 
@@ -59,8 +67,8 @@ Fine-grained tool requirements. Only include what's actually needed:
 - "deep_profile": ONLY for comprehensive self-knowledge requests like "what do you know about me?", "tell me about myself", "tell me something interesting about me", "give me a summary of everything you know about me", "surprise me with what you know". This triggers an exhaustive multi-source search. Do NOT use for simple recall like "what's my name?" or "where do I work?" — those are just memory.read.
 
 ## memoryDepth
-- "none": factual/web queries, greetings, banter — no personal context needed
-- "light": context-aware replies where a memory summary helps but full RAG isn't needed
+- "none": factual/web queries, simple acknowledgements, banter with no need for personal context
+- "light": context-aware replies where a memory summary helps but full RAG isn't needed. This includes re-entry or daypart greetings like "good morning" when a small amount of personal context would make the reply feel more human.
 - "full": recall tasks, meeting prep, anything needing deep personal context or RAG
 
 ## requiresToolUse
@@ -84,7 +92,10 @@ Set to true only if there is an active pending action in the context AND the mes
 - "normal": standard conversational messages
 - "deep": requests for detailed analysis, breakdowns, or comprehensive information`;
 
-function buildClassifierInput(input: TurnInput, context: RouterContext): Array<{ role: string; content: string }> {
+function buildClassifierInput(
+  input: TurnInput,
+  context: RouterContext,
+): Array<{ role: string; content: string }> {
   const messages: Array<{ role: string; content: string }> = [];
   const contextParts: string[] = [];
 
@@ -92,89 +103,129 @@ function buildClassifierInput(input: TurnInput, context: RouterContext): Array<{
     const turnSummary = context.recentTurns
       .slice(-4)
       .map((t) => `${t.role}: ${t.content.substring(0, 150)}`)
-      .join('\n');
+      .join("\n");
     contextParts.push(`Recent conversation:\n${turnSummary}`);
   }
 
   const wm = context.workingMemory;
   if (wm.activeTopics.length > 0) {
-    contextParts.push(`Active topics: ${wm.activeTopics.join(', ')}`);
+    contextParts.push(`Active topics: ${wm.activeTopics.join(", ")}`);
   }
   if (wm.pendingActions.length > 0) {
-    contextParts.push(`Pending actions: ${wm.pendingActions.map(a => `[${a.type}] ${a.description}`).join('; ')}`);
+    contextParts.push(
+      `Pending actions: ${
+        wm.pendingActions.map((a) => `[${a.type}] ${a.description}`).join("; ")
+      }`,
+    );
   }
 
   if (context.pendingEmailSends.length > 0) {
     const draft = context.pendingEmailSends[0];
-    contextParts.push(`Pending email draft: id=${draft.id}, to=${draft.to.join(', ')}, subject="${draft.subject ?? 'none'}", status=awaiting_confirmation`);
+    contextParts.push(
+      `Pending email draft: id=${draft.id}, to=${
+        draft.to.join(", ")
+      }, subject="${draft.subject ?? "none"}", status=awaiting_confirmation`,
+    );
   }
 
   if (contextParts.length > 0) {
-    messages.push({ role: 'user', content: `Context:\n${contextParts.join('\n\n')}` });
-    messages.push({ role: 'assistant', content: 'Understood. I will use this context for classification.' });
+    messages.push({
+      role: "user",
+      content: `Context:\n${contextParts.join("\n\n")}`,
+    });
+    messages.push({
+      role: "assistant",
+      content: "Understood. I will use this context for classification.",
+    });
   }
 
-  messages.push({ role: 'user', content: `Classify this message: "${input.userMessage.substring(0, 400)}"` });
+  messages.push({
+    role: "user",
+    content: `Classify this message: "${input.userMessage.substring(0, 400)}"`,
+  });
 
   return messages;
 }
 
 const DEFAULT_RESULT: ClassifierResult = {
-  mode: 'chat',
-  primaryDomain: 'general',
+  mode: "chat",
+  primaryDomain: "general",
   confidence: 0.3,
   requiredCapabilities: [],
-  memoryDepth: 'none',
+  memoryDepth: "none",
   requiresToolUse: false,
   isConfirmation: false,
-  style: 'normal',
+  style: "normal",
 };
 
-const DEEP_PROFILE_PATTERN = /\b(what do you know about me|tell me (about|everything about) (myself|me)|what have you (learned|figured out) about me|tell me something (interesting|surprising|cool) about me|surprise me with what you know|give me a (summary|rundown|profile) of (everything you know|what you know)|how well do you (know|understand) me|what('s| is) my profile|paint a picture of me|describe me based on what you know)\b/i;
+const DEEP_PROFILE_PATTERN =
+  /\b(what do you know about me|tell me (about|everything about) (myself|me)|what have you (learned|figured out) about me|tell me something (interesting|surprising|cool) about me|surprise me with what you know|give me a (summary|rundown|profile) of (everything you know|what you know)|how well do you (know|understand) me|what('s| is) my profile|paint a picture of me|describe me based on what you know)\b/i;
 
-function applyDeepProfileHeuristic(message: string, result: ClassifierResult): void {
-  if (result.requiredCapabilities.includes('deep_profile' as Capability)) return;
+function applyDeepProfileHeuristic(
+  message: string,
+  result: ClassifierResult,
+): void {
+  if (result.requiredCapabilities.includes("deep_profile" as Capability)) {
+    return;
+  }
   if (!DEEP_PROFILE_PATTERN.test(message)) return;
 
-  result.requiredCapabilities.push('deep_profile' as Capability);
-  result.mode = 'smart';
-  result.primaryDomain = 'recall';
-  result.memoryDepth = 'full';
+  result.requiredCapabilities.push("deep_profile" as Capability);
+  result.mode = "smart";
+  result.primaryDomain = "recall";
+  result.memoryDepth = "full";
   result.requiresToolUse = true;
-  console.log(`[classify-turn] deep_profile heuristic triggered for: "${message.substring(0, 60)}"`);
+  console.log(
+    `[classify-turn] deep_profile heuristic triggered for: "${
+      message.substring(0, 60)
+    }"`,
+  );
 }
 
-export async function classifyTurn(input: TurnInput, context: RouterContext): Promise<ClassifierResult> {
+export async function classifyTurn(
+  input: TurnInput,
+  context: RouterContext,
+): Promise<ClassifierResult> {
   const client = getOpenAIClient();
   const start = Date.now();
 
   try {
-    const response = await client.responses.create({
-      model: MODEL_MAP.orchestration,
-      instructions: CLASSIFIER_INSTRUCTIONS,
-      input: buildClassifierInput(input, context),
-      max_output_tokens: 1024,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.orchestration },
-    } as Parameters<typeof client.responses.create>[0]);
+    const response = await client.responses.create(
+      {
+        model: MODEL_MAP.orchestration,
+        instructions: CLASSIFIER_INSTRUCTIONS,
+        input: buildClassifierInput(input, context),
+        max_output_tokens: 1024,
+        store: false,
+        reasoning: { effort: REASONING_EFFORT.orchestration },
+      } as Parameters<typeof client.responses.create>[0],
+    );
 
     const ms = Date.now() - start;
-    const text = response.output_text ?? '';
+    const text = response.output_text ?? "";
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      console.warn(`[classify-turn] no JSON found in response (${ms}ms): "${text.substring(0, 200)}"`);
+      console.warn(
+        `[classify-turn] no JSON found in response (${ms}ms): "${
+          text.substring(0, 200)
+        }"`,
+      );
       return DEFAULT_RESULT;
     }
 
     const parsed = JSON.parse(jsonMatch[0]);
     const result: ClassifierResult = {
-      mode: parsed.mode === 'smart' ? 'smart' : 'chat',
+      mode: parsed.mode === "smart" ? "smart" : "chat",
       primaryDomain: validateDomain(parsed.primaryDomain),
       secondaryDomains: Array.isArray(parsed.secondaryDomains)
-        ? parsed.secondaryDomains.map(validateDomain).filter((d: DomainTag) => d !== 'general')
+        ? parsed.secondaryDomains.map(validateDomain).filter((d: DomainTag) =>
+          d !== "general"
+        )
         : undefined,
-      confidence: typeof parsed.confidence === 'number' ? Math.min(1, Math.max(0, parsed.confidence)) : 0.7,
+      confidence: typeof parsed.confidence === "number"
+        ? Math.min(1, Math.max(0, parsed.confidence))
+        : 0.7,
       requiredCapabilities: Array.isArray(parsed.requiredCapabilities)
         ? parsed.requiredCapabilities.filter(isValidCapability)
         : [],
@@ -190,7 +241,17 @@ export async function classifyTurn(input: TurnInput, context: RouterContext): Pr
 
     applyDeepProfileHeuristic(input.userMessage, result);
 
-    console.log(`[classify-turn] "${input.userMessage.substring(0, 60)}" → mode=${result.mode}, domain=${result.primaryDomain}${result.secondaryDomains?.length ? `+${result.secondaryDomains.join(',')}` : ''}, caps=[${result.requiredCapabilities.join(',')}], memory=${result.memoryDepth}, toolUse=${result.requiresToolUse}, conf=${result.confidence} (${ms}ms)`);
+    console.log(
+      `[classify-turn] "${
+        input.userMessage.substring(0, 60)
+      }" → mode=${result.mode}, domain=${result.primaryDomain}${
+        result.secondaryDomains?.length
+          ? `+${result.secondaryDomains.join(",")}`
+          : ""
+      }, caps=[${
+        result.requiredCapabilities.join(",")
+      }], memory=${result.memoryDepth}, toolUse=${result.requiresToolUse}, conf=${result.confidence} (${ms}ms)`,
+    );
 
     return result;
   } catch (err) {
@@ -200,11 +261,32 @@ export async function classifyTurn(input: TurnInput, context: RouterContext): Pr
   }
 }
 
-const VALID_DOMAINS: Set<string> = new Set(['email', 'calendar', 'meeting_prep', 'research', 'recall', 'contacts', 'general']);
-const VALID_CAPABILITIES: Set<string> = new Set(['email.read', 'email.write', 'calendar.read', 'calendar.write', 'contacts.read', 'granola.read', 'web.search', 'knowledge.search', 'memory.read', 'memory.write', 'travel.search', 'deep_profile']);
+const VALID_DOMAINS: Set<string> = new Set([
+  "email",
+  "calendar",
+  "meeting_prep",
+  "research",
+  "recall",
+  "contacts",
+  "general",
+]);
+const VALID_CAPABILITIES: Set<string> = new Set([
+  "email.read",
+  "email.write",
+  "calendar.read",
+  "calendar.write",
+  "contacts.read",
+  "granola.read",
+  "web.search",
+  "knowledge.search",
+  "memory.read",
+  "memory.write",
+  "travel.search",
+  "deep_profile",
+]);
 
 function validateDomain(d: unknown): DomainTag {
-  return VALID_DOMAINS.has(d as string) ? (d as DomainTag) : 'general';
+  return VALID_DOMAINS.has(d as string) ? (d as DomainTag) : "general";
 }
 
 function isValidCapability(c: unknown): c is Capability {
@@ -212,11 +294,11 @@ function isValidCapability(c: unknown): c is Capability {
 }
 
 function validateMemoryDepth(d: unknown): MemoryDepth {
-  if (d === 'none' || d === 'light' || d === 'full') return d;
-  return 'none';
+  if (d === "none" || d === "light" || d === "full") return d;
+  return "none";
 }
 
 function validateStyle(s: unknown): UserStyle {
-  if (s === 'brief' || s === 'normal' || s === 'deep') return s;
-  return 'normal';
+  if (s === "brief" || s === "normal" || s === "deep") return s;
+  return "normal";
 }

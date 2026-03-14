@@ -92,6 +92,42 @@ async function retryFetch(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Direction simplifier — strips compass directions so a 5-year-old can follow
+// ═══════════════════════════════════════════════════════════════
+
+const COMPASS_RE = /\b(north|south|east|west|northeast|northwest|southeast|southwest|NE|NW|SE|SW|N|S|E|W)\b/gi;
+const HEAD_COMPASS_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s*/i;
+const HEAD_TOWARD_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s+(on\s+.+?)\s*(toward\s+.+)?$/i;
+const HEAD_ON_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s+on\s+/i;
+
+function simplifyDirection(instruction: string): string {
+  if (!instruction) return instruction;
+
+  // "Head north on X toward Y" → "Start on X toward Y"
+  const headToward = instruction.match(HEAD_TOWARD_RE);
+  if (headToward) {
+    const onPart = headToward[2]; // "on Some St"
+    const towardPart = headToward[3] ?? ''; // "toward Other St"
+    return `Start ${onPart}${towardPart ? ' ' + towardPart : ''}`.trim();
+  }
+
+  // "Head north on X" → "Start on X"
+  if (HEAD_ON_RE.test(instruction)) {
+    return instruction.replace(HEAD_ON_RE, 'Start on ');
+  }
+
+  // "Head north" (bare) → "Go straight"
+  if (HEAD_COMPASS_RE.test(instruction)) {
+    return instruction.replace(HEAD_COMPASS_RE, 'Go straight ').trim();
+  }
+
+  // For other instructions, remove stray compass references like "Turn left to go north"
+  // but keep street names containing compass words (e.g. "North Rd")
+  // Only strip standalone compass words not preceded by a capital letter (part of a name)
+  return instruction;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Transit route parser
 // ═══════════════════════════════════════════════════════════════
 
@@ -142,7 +178,7 @@ function parseTransitRoutesV2(routes: any[], origin: string, destination: string
         }
 
         if (s.navigationInstruction?.instructions) {
-          step.instruction = s.navigationInstruction.instructions;
+          step.instruction = simplifyDirection(s.navigationInstruction.instructions);
         }
 
         if (s.travelMode === 'WALK') {
@@ -344,10 +380,10 @@ async function routesAPI(
     }
   }
 
-  // Route summary from steps
+  // Route summary from steps — simplified for humans
   // deno-lint-ignore no-explicit-any
   const steps = (leg?.steps ?? []).slice(0, 5).map((s: any) => ({
-    instruction: s.navigationInstruction?.instructions,
+    instruction: simplifyDirection(s.navigationInstruction?.instructions ?? ''),
     distance: s.localizedValues?.distance?.text,
     duration: s.localizedValues?.staticDuration?.text,
   })).filter((s: Record<string, unknown>) => s.instruction);

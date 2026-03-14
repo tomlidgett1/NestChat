@@ -7,7 +7,10 @@ const EXTRACTION_PROMPT = `Extract structured working memory from this conversat
   "active_topics": ["topic1", "topic2"],
   "unresolved_references": ["reference1"],
   "pending_actions": [{"type": "email_draft", "description": "Draft email to Sarah about timeline"}],
-  "last_entity_mentioned": "entity or null"
+  "last_entity_mentioned": "entity or null",
+  "awaiting_confirmation": false,
+  "awaiting_choice": false,
+  "awaiting_missing_parameter": false
 }
 
 Rules:
@@ -15,8 +18,11 @@ Rules:
 - unresolved_references: Things mentioned but not yet resolved (e.g. "the email from Sarah" when we haven't searched yet)
 - pending_actions: Actions the user expects or that are in progress (e.g. unsent draft, unanswered question)
 - last_entity_mentioned: The most recent person, place, or thing referenced
+- awaiting_confirmation: true if the assistant asked the user to confirm an action (e.g. "Shall I send it?", "Want me to book that?", "Should I check?")
+- awaiting_choice: true if the assistant asked the user to pick between options (e.g. "Which calendar?", "Google or Outlook?")
+- awaiting_missing_parameter: true if the assistant asked for a missing detail needed to complete an action (e.g. "What time?", "Who should I send it to?")
 - Be concise. Each topic/reference should be 2-5 words.
-- Return empty arrays if nothing applies.`;
+- Return empty arrays if nothing applies. Return false for awaiting flags unless clearly true.`;
 
 export async function extractWorkingMemory(
   userMessage: string,
@@ -67,6 +73,9 @@ export async function extractWorkingMemory(
       unresolvedReferences: (parsed.unresolved_references ?? []).slice(0, 5),
       pendingActions: [...nonEmailPendingActions, ...durableEmailPendingActions].slice(0, 5),
       lastEntityMentioned: parsed.last_entity_mentioned ?? null,
+      awaitingConfirmation: parsed.awaiting_confirmation === true,
+      awaitingChoice: parsed.awaiting_choice === true,
+      awaitingMissingParameter: parsed.awaiting_missing_parameter === true,
     };
   } catch (err) {
     console.warn('[working-memory] extraction failed:', (err as Error).message);

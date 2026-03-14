@@ -125,7 +125,10 @@ export interface RouteDecision {
   classifierResult?: ClassifierResult;
   memoryDepth?: MemoryDepth;
   forcedToolChoice?: string;
-  routeLayer?: '0A' | '0B' | '0C';
+  routeLayer?: '0A' | '0B-casual' | '0B-knowledge' | '0C';
+  routeReason?: string;
+  matchedDisqualifierBucket?: string | null;
+  hadPendingState?: boolean;
   reasoningEffortOverride?: import('../ai/models.ts').ReasoningEffort;
   modelOverride?: string;
 }
@@ -143,6 +146,9 @@ export interface WorkingMemory {
     createdTurnId: string;
   }>;
   lastEntityMentioned: string | null;
+  awaitingConfirmation?: boolean;
+  awaitingChoice?: boolean;
+  awaitingMissingParameter?: boolean;
 }
 
 export function emptyWorkingMemory(): WorkingMemory {
@@ -151,6 +157,9 @@ export function emptyWorkingMemory(): WorkingMemory {
     unresolvedReferences: [],
     pendingActions: [],
     lastEntityMentioned: null,
+    awaitingConfirmation: false,
+    awaitingChoice: false,
+    awaitingMissingParameter: false,
   };
 }
 
@@ -356,7 +365,10 @@ export interface TurnTrace {
   routeDecision: RouteDecision;
   // Option A observability
   classifierResult?: ClassifierResult;
-  routeLayer?: '0A' | '0B' | '0C';
+  routeLayer?: '0A' | '0B-casual' | '0B-knowledge' | '0C';
+  routeReason?: string;
+  matchedDisqualifierBucket?: string | null;
+  hadPendingState?: boolean;
   classifierLatencyMs?: number;
 
   // Context

@@ -41,6 +41,24 @@ const DRIVE_FIELD_MASK = [
 
 const MODE_MAP: Record<string, string> = { driving: 'DRIVE', walking: 'WALK', bicycling: 'BICYCLE', transit: 'TRANSIT' };
 
+// Direction simplifier — strips compass directions
+const HEAD_TOWARD_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s+(on\s+.+?)\s*(toward\s+.+)?$/i;
+const HEAD_ON_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s+on\s+/i;
+const HEAD_COMPASS_RE = /^Head\s+(north|south|east|west|northeast|northwest|southeast|southwest)\s*/i;
+
+function simplifyDirection(instruction: string): string {
+  if (!instruction) return instruction;
+  const headToward = instruction.match(HEAD_TOWARD_RE);
+  if (headToward) {
+    const onPart = headToward[2];
+    const towardPart = headToward[3] ?? '';
+    return `Start ${onPart}${towardPart ? ' ' + towardPart : ''}`.trim();
+  }
+  if (HEAD_ON_RE.test(instruction)) return instruction.replace(HEAD_ON_RE, 'Start on ');
+  if (HEAD_COMPASS_RE.test(instruction)) return instruction.replace(HEAD_COMPASS_RE, 'Go straight ').trim();
+  return instruction;
+}
+
 function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -70,7 +88,7 @@ function parseTransitRoutes(routes: any[], origin: string, destination: string):
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const step: any = { mode: s.travelMode === 'WALK' ? 'walking' : 'transit' };
       if (s.localizedValues) { step.distance = s.localizedValues.distance?.text; step.duration = s.localizedValues.staticDuration?.text; }
-      if (s.navigationInstruction?.instructions) step.instruction = s.navigationInstruction.instructions;
+      if (s.navigationInstruction?.instructions) step.instruction = simplifyDirection(s.navigationInstruction.instructions);
       if (s.transitDetails) {
         const td = s.transitDetails;
         const line = td.transitLine;
@@ -143,7 +161,7 @@ async function executeTravelTime(input: Record<string, any>): Promise<any> {
   const durationSec = route.duration ? parseInt(String(route.duration).replace('s', ''), 10) : undefined;
   if (durationSec) result.duration_seconds = durationSec;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const steps = (leg?.steps ?? []).slice(0, 5).map((s: any) => ({ instruction: s.navigationInstruction?.instructions, distance: s.localizedValues?.distance?.text, duration: s.localizedValues?.staticDuration?.text })).filter((s: any) => s.instruction);
+  const steps = (leg?.steps ?? []).slice(0, 5).map((s: any) => ({ instruction: simplifyDirection(s.navigationInstruction?.instructions ?? ''), distance: s.localizedValues?.distance?.text, duration: s.localizedValues?.staticDuration?.text })).filter((s: any) => s.instruction);
   if (steps.length) result.route_summary = steps;
   return result;
 }
@@ -478,6 +496,11 @@ async function main() {
             if (transitLeg) console.log(`   Line: ${transitLeg.line_name ?? '?'}, Stops: ${transitLeg.num_stops ?? '?'}`);
           } else {
             console.log(`   ${result.distance ?? '?'}, ${result.duration ?? '?'}`);
+            if (result.route_summary?.length) {
+              for (const step of result.route_summary.slice(0, 3)) {
+                console.log(`   → ${step.instruction} (${step.distance ?? '?'})`);
+              }
+            }
           }
         } else {
           if (result.results) {
