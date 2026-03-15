@@ -94,6 +94,24 @@ function splitBubbles(text: string): string[] {
   return chunks.length > 0 ? chunks : [text.trim().slice(0, MAX_BUBBLE_LENGTH)];
 }
 
+function enforceOnboardingVerificationBubble(
+  text: string | null,
+  onboardUrl: string,
+  userTurnNumber: number,
+  alreadySentVerification: boolean,
+): string | null {
+  // Requirement: send verification between user message 4-5, but not before 3.
+  // Keep the verification link in its own bubble.
+  if (alreadySentVerification) return text;
+  if (userTurnNumber < 4 || userTurnNumber > 5) return text;
+
+  const verificationLine = "quick one - i just need to confirm you're a human";
+  const injected = `${verificationLine}\n---\n${onboardUrl}`;
+
+  if (!text || !text.trim()) return injected;
+  return `${text.trim()}\n---\n${injected}`;
+}
+
 function fireAndForget(promise: Promise<unknown>): void {
   promise.catch((err) => console.warn('[pipeline] fire-and-forget error:', err));
 }
@@ -439,6 +457,17 @@ export async function processMessage(message: NormalisedIncomingMessage, eventId
         }
 
         const result = await handleTurn(turnInput);
+
+        const userTurnNumber = nestUser.onboardCount + 1;
+        const alreadySentVerification = nestUser.onboardMessages.some((m) =>
+          m.role === 'assistant' && m.content.includes('https://nest.expert/')
+        );
+        result.text = enforceOnboardingVerificationBubble(
+          result.text,
+          onboardUrl,
+          userTurnNumber,
+          alreadySentVerification,
+        );
 
         // Onboarding state machine events
         await emitOnboardingEvents(message, nestUser, result);

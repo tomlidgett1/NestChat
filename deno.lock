@@ -884,6 +884,7 @@
     "packageJson": {
       "dependencies": [
         "npm:@anthropic-ai/sdk@0.39",
+        "npm:@google/genai@^1.45.0",
         "npm:@supabase/supabase-js@^2.98.0",
         "npm:@types/express@5",
         "npm:@types/node@22",

@@ -87,8 +87,8 @@ const tests: TestCase[] = [
   { name: 'L2: write me a joke', message: 'write me a joke', expectedLane: '0B-knowledge' },
   { name: 'L2: whats your view on jazz', message: "what's your view on jazz", expectedLane: '0B-knowledge' },
   { name: 'L2: how do trains work', message: 'how do trains work', expectedLane: '0B-knowledge' },
-  { name: 'L2: what is a standup meeting', message: 'what is a standup meeting', expectedLane: '0B-knowledge' },
-  { name: 'L2: meeting culture in Japan', message: 'tell me about meeting culture in Japan', expectedLane: '0B-knowledge' },
+  { name: 'L3: what is a standup meeting', message: 'what is a standup meeting', expectedLane: '0C' },
+  { name: 'L3: meeting culture in Japan', message: 'tell me about meeting culture in Japan', expectedLane: '0C' },
   { name: 'L2: how should I reply politely', message: 'how should I reply politely', expectedLane: '0B-knowledge' },
   { name: 'L2: summarise this paragraph', message: 'summarise this paragraph', expectedLane: '0B-knowledge' },
   { name: 'L2: trams in Melbourne history', message: 'tell me about trams in Melbourne history', expectedLane: '0B-knowledge' },
@@ -97,6 +97,15 @@ const tests: TestCase[] = [
   { name: 'L2: what is machine learning', message: 'what is machine learning', expectedLane: '0B-knowledge' },
   { name: 'L2: tell me a fun fact', message: 'tell me a fun fact', expectedLane: '0B-knowledge' },
   { name: 'L2: whats the difference between HTTP and HTTPS', message: "what's the difference between HTTP and HTTPS", expectedLane: '0B-knowledge' },
+
+  // ── Lane 3: Classifier (disqualifier: meeting prep intent) ─────
+  { name: 'L3: help me prepare for my Monday meeting', message: 'Please help me prepare for my Monday meeting', expectedLane: '0C' },
+  { name: 'L3: prep me for the standup', message: 'prep me for the standup', expectedLane: '0C' },
+  { name: 'L3: brief me for the 1:1', message: 'brief me for the 1:1', expectedLane: '0C' },
+  { name: 'L3: get me ready for the call', message: 'get me ready for the call', expectedLane: '0C' },
+  { name: 'L3: meeting prep for tomorrow', message: 'meeting prep for tomorrow', expectedLane: '0C' },
+  { name: 'L3: help me prepare for the interview', message: 'help me prepare for the interview', expectedLane: '0C' },
+  { name: 'L3: prepare for my Monday meeting', message: 'prepare for my Monday meeting', expectedLane: '0C' },
 
   // ── Lane 3: Classifier (disqualifier: personal system nouns) ─
   { name: 'L3: check my inbox', message: 'check my inbox', expectedLane: '0C' },

@@ -178,7 +178,7 @@ const LANE2_NAMESPACES: ToolNamespace[] = [
 ];
 
 const SAFE_CASUAL_EXPANDED =
-  /^(hey|hi|hello|yo|sup|hiya|howdy|thanks|thank you|cheers|thx|nice|cool|awesome|perfect|lol|haha|hahaha|lmao|rofl|bye|cya|see ya|later|ttyl|good morning|morning|gm|gn|night|hey!|hi!|hello!|hey\?|hello\?|hi\?|what'?s up\??|whats up\??|sup\??|how are you\??|how'?s it going\??|how'?s things\??|hey,? how are you\??|hey,? what'?s up\??|hey,? how'?s it going\??|hey whats up|yo what'?s up|no worries|fair enough|huh|hmm|ah|oh|interesting|right|true|same|word|bet|aight|all good|sounds good|ok|okay|k|kk|sure|yep|yup|nah|nope|yeah|na|great|yes|no|\?|!)$/i;
+  /^(hey|hi|hello|yo|sup|hiya|howdy|thanks|thank you|cheers|thx|nice|cool|awesome|perfect|amazing|wow|damn|omg|wtf|lol|haha|hahaha|lmao|rofl|bye|cya|see ya|later|ttyl|good morning|morning|gm|gn|night|hey!|hi!|hello!|hey\?|hello\?|hi\?|what'?s up\??|whats up\??|sup\??|how are you\??|how'?s it going\??|how'?s things\??|hey,? how are you\??|hey,? what'?s up\??|hey,? how'?s it going\??|hey whats up|yo what'?s up|no worries|fair enough|huh|hmm|ah|oh|interesting|right|true|same|word|bet|aight|all good|sounds good|ok|okay|k|kk|sure|yep|yup|nah|nope|yeah|na|great|yes|no|\?|!)$/i;
 const DAYPART_GREETING =
   /^(good\s+)?(morning|afternoon|evening|night)[!.?]*$|^(gm|gn)[!.?]*$/i;
 
@@ -186,22 +186,42 @@ const DAYPART_GREETING =
 // If ANY bucket matches, the message goes to Lane 3 (classifier).
 
 const PERSONAL_SYSTEM_NOUNS =
-  /\b(inbox|calendar|schedule|emails?|gmail|outlook|contacts?|messages?|account|granola)\b/i;
+  /\b(inbox|calendar|schedule|emails?|gmail|outlook|contacts?|messages?|account|granola|meetings?)\b/i;
 
 const WORKFLOW_VERBS =
-  /\b(send|draft|book|remind|schedule|cancel|delete|create|update|forward|compose|set up|arrange)\b/i;
+  /\b(send|draft|book|remind|schedule|cancel|delete|create|update|forward|compose|set up|arrange|prepare|prep)\b/i;
 
 const TEMPORAL_SIGNALS =
-  /\b(today|tomorrow|tonight|yesterday|this week|next week|this weekend|right now|currently|latest|current|open now)\b/i;
+  /\b(today|tomorrow|tonight|yesterday|this week|next week|next month|this weekend|right now|currently|latest|current|open now|later today|later tonight|this morning|this afternoon|this evening|this arvo|at the moment|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
 
 const EXPLICIT_TIME =
   /\b\d{1,2}(:\d{2})?\s?(am|pm)\b/i;
 
 const LOCAL_OR_TRAVEL =
-  /\b(near me|nearest|directions?\b|how long to get|how far to|from .{1,40} to .{1,40}|open now|walk to|drive to|cycle to|train from .{1,40} to|flight from .{1,40} to|bus from .{1,40} to|tram from .{1,40} to)\b/i;
+  /\b(near me|near \w{2,}|nearest|directions?\b|how long to get|how far to|from .{1,40} to .{1,40}|open now|walk to|drive to|cycle to|train from .{1,40} to|flight from .{1,40} to|bus from .{1,40} to|tram from .{1,40} to)/i;
+
+const EVENT_TIME_QUERY =
+  /\b(what time|when does|when is|when'?s|what time'?s|what day is|who'?s playing|who won|what'?s the score|what'?s on at|kick'?s? off|bounce|first ball|starts? at|line-?up|team sheet|fixture)\b/i;
+
+const WEATHER_PRICE_LIVE =
+  /\b(weather|forecast|rain(ing)?|temperature|degrees|humid|cold .{0,10}outside|hot .{0,10}outside|warm .{0,10}outside|freezing|sunny|cloudy|storm|snow(ing)?|stock|shares?|share price|price of|how much does .{1,30} cost|how much is .{1,20} worth|bitcoin|crypto|btc|eth|asx|nasdaq|dow jones|exchange rate|interest rate)\b/i;
+
+const NEWS_CURRENT =
+  /\b(news about|any news|what happened with|what'?s going on with|what'?s happening|latest on|update on|updates? about|breaking)\b/i;
+
+const LOOKUP_VERBS =
+  /\b(look up|find|search for|check on|check if|check the|check internet|use internet|use the internet|use web|search the web|search online|google|number for|address of|phone number|contact info|reviews? of|reviews? for|rating for|rated)\b/i;
+
+const LOCATION_INTENT =
+  /\b(best .{1,30} in [A-Z][a-z]|good .{1,30} in [A-Z][a-z]|top .{1,30} in [A-Z][a-z]|where can I .{1,30} in [A-Z][a-z]|where to .{1,30} in [A-Z][a-z]|places to .{1,30} in [A-Z][a-z])/i;
 
 const HIDDEN_PERSONAL =
-  /\b(what'?s on tomorrow|what'?s on today|any emails|any unread|did [A-Z][a-z]+ reply|did [A-Z][a-z]+ respond|free after|busy at|available at|what'?s in my)\b/i;
+  /\b(what'?s on tomorrow|what'?s on today|any emails|any unread|did [A-Z][a-z]+ reply|did [A-Z][a-z]+ respond|free after|busy at|available at|what'?s in my|check my|show me my|my inbox|my calendar|my schedule|my contacts|my emails|meeting notes|what was discussed|what did we discuss|notes from .{1,20} meeting|how many emails|how many meetings)\b/i;
+
+const MEETING_PREP_VERBS =
+  /\b(prep(are)?( me)?( for)?|brief me|get (me )?ready for|what do i need to know (for|about)|meeting prep|help me prepare|what should i say( first)?|how should i handle|how do i sound prepared|give me the (20|30)[-\s]?second|quick brief|full brief)\b/i;
+const MEETING_PREP_NOUNS =
+  /\b(meeting|call|standup|sync|catch ?up|review|1[:\-]1|one.on.one|appointment|session|interview|wbr)\b/i;
 
 type DisqualifierBucket =
   | 'personal_system_nouns'
@@ -209,14 +229,26 @@ type DisqualifierBucket =
   | 'temporal_signals'
   | 'explicit_time'
   | 'local_or_travel'
-  | 'hidden_personal';
+  | 'event_time_query'
+  | 'weather_price_live'
+  | 'news_current'
+  | 'lookup_verbs'
+  | 'location_intent'
+  | 'hidden_personal'
+  | 'meeting_prep_intent';
 
 function matchedDisqualifier(message: string): DisqualifierBucket | null {
+  if (MEETING_PREP_VERBS.test(message) && MEETING_PREP_NOUNS.test(message)) return 'meeting_prep_intent';
   if (PERSONAL_SYSTEM_NOUNS.test(message)) return 'personal_system_nouns';
   if (WORKFLOW_VERBS.test(message)) return 'workflow_verbs';
   if (TEMPORAL_SIGNALS.test(message)) return 'temporal_signals';
   if (EXPLICIT_TIME.test(message)) return 'explicit_time';
   if (LOCAL_OR_TRAVEL.test(message)) return 'local_or_travel';
+  if (EVENT_TIME_QUERY.test(message)) return 'event_time_query';
+  if (WEATHER_PRICE_LIVE.test(message)) return 'weather_price_live';
+  if (NEWS_CURRENT.test(message)) return 'news_current';
+  if (LOOKUP_VERBS.test(message)) return 'lookup_verbs';
+  if (LOCATION_INTENT.test(message)) return 'location_intent';
   if (HIDDEN_PERSONAL.test(message)) return 'hidden_personal';
   return null;
 }
@@ -235,11 +267,24 @@ function hasPendingState(context: RouterContext): boolean {
   );
 }
 
-function lastAssistantUsedTools(context: RouterContext): boolean {
-  const lastAssistant = context.recentTurns
-    .filter((t) => t.role === "assistant")
-    .slice(-1)[0]?.content ?? "";
-  return /\[(email_read|email_draft|email_send|calendar_read|calendar_write|contacts_read|travel_time|places_search|semantic_search|granola_read|web_search)\]/.test(lastAssistant);
+function lastAssistantUsedTools(context: RouterContext, userMessage: string): boolean {
+  const TOOL_TAG = /\[(email_read|email_draft|email_send|calendar_read|calendar_write|contacts_read|travel_time|places_search|semantic_search|granola_read|web_search|plan_steps)\]/;
+  const assistants = context.recentTurns
+    .filter((t) => t.role === "assistant");
+
+  // Always check the very last assistant turn
+  const last = assistants.slice(-1)[0]?.content ?? "";
+  if (TOOL_TAG.test(last)) return true;
+
+  // For short messages (likely follow-ups like "Who's playing?", "Nice",
+  // "What about their hours?"), extend the lookback to 3 turns so a quick
+  // casual exchange doesn't clear tool context. Longer messages are almost
+  // certainly a new topic and shouldn't be penalised by old tool usage.
+  if (userMessage.length <= 30) {
+    return assistants.slice(-3).some((t) => TOOL_TAG.test(t.content));
+  }
+
+  return false;
 }
 
 // ── Safe casual detection ─────────────────────────────────────
@@ -282,11 +327,12 @@ function tryDeterministicContinuation(
     };
   }
 
-  const msg = input.userMessage.trim().replace(/\s+/g, ' ');
+  // Normalise smart/curly quotes to straight quotes — iMessage sends these
+  const msg = input.userMessage.trim().replace(/\s+/g, ' ').replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"');
 
   // Step 0: Pending state check
   const pending = hasPendingState(context);
-  const toolsInLastTurn = lastAssistantUsedTools(context);
+  const toolsInLastTurn = lastAssistantUsedTools(context, msg);
 
   if (pending || toolsInLastTurn) {
     return null; // → Lane 3 (classifier)
@@ -436,7 +482,7 @@ export async function routeTurnV2(
   // Pre-compute pending state and disqualifier for telemetry
   const msg = input.userMessage.trim().replace(/\s+/g, ' ');
   const pending = hasPendingState(context);
-  const toolsInLastTurn = lastAssistantUsedTools(context);
+  const toolsInLastTurn = lastAssistantUsedTools(context, msg);
   const disqualifier = matchedDisqualifier(msg);
 
   const layer0B = tryDeterministicContinuation(input, context);

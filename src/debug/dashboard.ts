@@ -857,7 +857,10 @@ function estimateCost(t) {
   var inputRate = 0;
   var outputRate = 0;
   var model = (t.model_used || '').toLowerCase();
-  if (model.includes('5-nano') || model.includes('nano')) {
+  if (model.includes('gemini')) {
+    inputRate = 0.00 / 1000000;
+    outputRate = 0.00 / 1000000;
+  } else if (model.includes('5-nano') || model.includes('nano')) {
     inputRate = 0.10 / 1000000;
     outputRate = 0.40 / 1000000;
   } else if (model.includes('4.1-mini')) {

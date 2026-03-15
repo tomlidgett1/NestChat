@@ -17,7 +17,7 @@ const CAPABILITY_TO_NAMESPACES: Record<Capability, ToolNamespace[]> = {
 
 const DOMAIN_BASE_TOOLS: Record<DomainTag, ToolNamespace[]> = {
   email: ['email.read', 'email.write', 'contacts.read', 'memory.read'],
-  calendar: ['calendar.read', 'calendar.write', 'contacts.read', 'memory.read'],
+  calendar: ['calendar.read', 'calendar.write', 'contacts.read', 'memory.read', 'email.read', 'knowledge.search'],
   meeting_prep: ['calendar.read', 'granola.read', 'email.read', 'contacts.read', 'knowledge.search', 'memory.read', 'web.search'],
   research: ['web.search', 'knowledge.search', 'contacts.read', 'memory.read', 'travel.search'],
   recall: ['memory.read', 'knowledge.search', 'granola.read'],
@@ -53,7 +53,10 @@ export function resolveTools(result: ClassifierResult): ToolNamespace[] {
     }
   }
 
-  if (result.confidence < 0.7) {
+  if (result.primaryDomain === 'meeting_prep') {
+    const baseDomain = DOMAIN_BASE_TOOLS.meeting_prep;
+    for (const ns of baseDomain) nsSet.add(ns);
+  } else if (result.confidence < 0.7) {
     const baseDomain = DOMAIN_BASE_TOOLS[result.primaryDomain];
     if (baseDomain) {
       for (const ns of baseDomain) nsSet.add(ns);

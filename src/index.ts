@@ -6,6 +6,9 @@ import { sendMessage, markAsRead, startTyping, sendReaction } from './sendblue/c
 import { chat, getGroupChatAction, getTextForEffect, generateImage } from './claude-local-dev/client.js';
 import { getUserProfile, addMessage } from './state/conversation.js';
 import { debugDashboardHtml } from './debug/dashboard.js';
+import { comparePageHtml } from './debug/compare.js';
+import { handleCompareChat, handleCompareClear, handleCompareGetPrompt, handleCompareUsers, handleCompareUserContext } from './compare/api.js';
+import { handleOnboardNew, handleOnboardChat, handleOnboardState, handleOnboardAgentChat } from './compare/onboard-api.js';
 
 // Clean up LLM response formatting quirks before sending
 function cleanResponse(text: string): string {
@@ -89,6 +92,24 @@ app.get('/debug', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(debugDashboardHtml);
 });
+
+// Model comparison page
+app.get('/compare', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(comparePageHtml);
+});
+
+app.post('/compare/api/chat', handleCompareChat);
+app.post('/compare/api/clear', handleCompareClear);
+app.get('/compare/api/prompt', handleCompareGetPrompt);
+app.get('/compare/api/users', handleCompareUsers);
+app.get('/compare/api/user-context', handleCompareUserContext);
+
+// Onboarding test endpoints
+app.post('/compare/api/onboard/new', handleOnboardNew);
+app.post('/compare/api/onboard/chat', handleOnboardChat);
+app.post('/compare/api/onboard/agent-chat', handleOnboardAgentChat);
+app.get('/compare/api/onboard/state', handleOnboardState);
 
 app.get('/debug/api/traces', async (req, res) => {
   const limit = parseInt(req.query.limit as string) || 100;
@@ -287,6 +308,7 @@ app.listen(PORT, () => {
 ║    POST /webhook  - Sendblue webhook receiver         ║
 ║    GET  /health   - Health check                      ║
 ║    GET  /debug    - Decision tree inspector            ║
+║    GET  /compare  - Model comparison tool              ║
 ║                                                       ║
 ║  Next steps:                                          ║
 ║    1. Run: ngrok http ${PORT}                            ║

@@ -104,7 +104,7 @@ const tests: LatencyTest[] = [
         subject: 'Latency confirmation test',
       });
     },
-    expect: { routeAgent: 'productivity', fastPath: true, contextPath: 'light', ragSkipped: true, model: 'gpt-4.1-mini', maxLatencyMs: 6000 },
+    expect: { routeAgent: 'productivity', fastPath: true, contextPath: 'light', ragSkipped: true, model: 'gemini-3.1-flash-lite-preview', maxLatencyMs: 6000 },
   },
 
   // ─── CASUAL CHAT (target: <5s) ───────────────────────────

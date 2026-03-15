@@ -1,12 +1,21 @@
 import {
   type FunctionCallOutput,
   getOpenAIClient,
+  isGeminiModel,
   MODEL_MAP,
   type ModelTier,
   type OpenAITool,
   REASONING_EFFORT,
   type ReasoningEffort,
 } from "../ai/models.ts";
+import {
+  geminiGenerateContent,
+  type GeminiTool,
+  type GeminiUnifiedResponse,
+  modelPartsToGeminiContent,
+  toGeminiContents,
+  toGeminiFunctionResponses,
+} from "../ai/gemini.ts";
 import type {
   AgentConfig,
   AgentLoopResult,
@@ -26,7 +35,7 @@ import type {
   ToolContext,
   ToolExecutionResult,
 } from "../tools/types.ts";
-import { toOpenAITool } from "../tools/types.ts";
+import { toGeminiTools, toOpenAITool } from "../tools/types.ts";
 import { filterToolsByNamespace } from "../tools/namespace-filter.ts";
 import { executePoliciedToolCalls } from "../tools/executor.ts";
 import {
@@ -169,6 +178,9 @@ export async function runAgentLoop(
     ? []
     : filterToolsByNamespace(allowedNamespaces);
   const openaiTools: OpenAITool[] = availableTools.map(toOpenAITool);
+  const geminiTools: GeminiTool[] = availableTools.length > 0
+    ? toGeminiTools(availableTools)
+    : [];
   const toolFilterMs = Date.now() - filterStart;
 
   const effectiveTier = modelTierOverride ?? resolveModelTier(agent);
@@ -198,6 +210,15 @@ export async function runAgentLoop(
     ...recentHistory,
     { role: "user", content: context.messageContent },
   ];
+
+  const useGemini = isGeminiModel(effectiveModel);
+
+  // Gemini maintains its own contents array (different format from OpenAI)
+  let geminiContents = useGemini
+    ? toGeminiContents(apiInput as Array<{ role: string; content?: string | unknown[] }>)
+    : [];
+  // Map call_id → function name for Gemini tool result routing
+  const geminiCallIdToName = new Map<string, string>();
 
   const toolCtx: ToolContext = {
     chatId: input.chatId,
@@ -233,7 +254,7 @@ export async function runAgentLoop(
     );
   }
   console.log(
-    `[agent-loop] starting: agent=${agent.name}, model=${effectiveModel}, effort=${reasoningEffort}, tools=${availableTools.length}, maxRounds=${maxRounds}, promptLen=${systemPrompt.length}, promptComposeMs=${promptComposeMs}, toolFilterMs=${toolFilterMs}`,
+    `[agent-loop] starting: agent=${agent.name}, model=${effectiveModel}, provider=${useGemini ? "gemini" : "openai"}, effort=${reasoningEffort}, tools=${availableTools.length}, maxRounds=${maxRounds}, promptLen=${systemPrompt.length}, promptComposeMs=${promptComposeMs}, toolFilterMs=${toolFilterMs}`,
   );
 
   for (let round = 0; round <= maxRounds; round++) {
@@ -244,7 +265,7 @@ export async function runAgentLoop(
       ? forcedToolChoice
       : undefined;
 
-    const useReasoning = reasoningEffort !== "none";
+    const useReasoning = !useGemini && reasoningEffort !== "none";
     const keepHighEffort = reasoningEffortOverride && round <= 4;
     const roundEffort = !useReasoning
       ? "none" as ReasoningEffort
@@ -262,117 +283,147 @@ export async function runAgentLoop(
     }
 
     const apiCallStart = Date.now();
-    const reasoningParams = useReasoning
-      ? {
-        reasoning: { effort: roundEffort },
-        include: ["reasoning.encrypted_content"],
-      }
-      : {};
-    const response = await client.responses.create(
-      {
-        model: effectiveModel,
-        instructions: systemPrompt,
-        input: apiInput as Parameters<
-          typeof client.responses.create
-        >[0]["input"],
-        tools: openaiTools as Parameters<
-          typeof client.responses.create
-        >[0]["tools"],
-        max_output_tokens: currentMaxOutputTokens,
-        store: false,
-        ...reasoningParams,
-        ...(useToolChoice ? { tool_choice: useToolChoice } : {}),
-      } as Parameters<typeof client.responses.create>[0],
-    );
-    const apiCallMs = Date.now() - apiCallStart;
 
-    const usage = (response as Record<string, unknown>).usage as
-      | Record<string, number>
-      | undefined;
-    const roundInputTokens = usage?.input_tokens ?? 0;
-    const roundOutputTokens = usage?.output_tokens ?? 0;
-    totalInputTokens += roundInputTokens;
-    totalOutputTokens += roundOutputTokens;
-
-    const roundText = response.output_text ?? "";
+    // Unified response variables
+    let roundText = "";
     const pendingCalls: PendingToolCall[] = [];
     let roundWebSearch = false;
+    let roundInputTokens = 0;
+    let roundOutputTokens = 0;
+    let responseStatus: string = "completed";
+    let responseOutputLength = 0;
+    // For Gemini: raw model parts for feeding back into the next round
+    let geminiRawParts: import("../ai/gemini.ts").GeminiPart[] = [];
+    // For OpenAI: raw response for feeding back
+    // deno-lint-ignore no-explicit-any
+    let openaiResponse: any = null;
 
-    for (const item of response.output) {
-      if (item.type === "function_call") {
-        const fc = item as unknown as {
-          call_id: string;
-          name: string;
-          arguments: string;
-        };
+    if (useGemini) {
+      // ═══════════════════════ GEMINI PATH ═══════════════════════
+      const geminiResult = await geminiGenerateContent({
+        model: effectiveModel,
+        systemPrompt,
+        contents: geminiContents,
+        tools: geminiTools.length > 0 ? geminiTools : undefined,
+        toolChoice: useToolChoice,
+        maxOutputTokens: currentMaxOutputTokens,
+      });
+
+      roundText = geminiResult.outputText;
+      roundInputTokens = geminiResult.usage.inputTokens;
+      roundOutputTokens = geminiResult.usage.outputTokens;
+      responseStatus = geminiResult.status;
+      responseOutputLength = geminiResult.rawModelParts.length;
+      geminiRawParts = geminiResult.rawModelParts;
+
+      for (const fc of geminiResult.functionCalls) {
         let parsedArgs: Record<string, unknown> = {};
         try {
           parsedArgs = JSON.parse(fc.arguments);
         } catch { /* empty */ }
         pendingCalls.push({
-          id: fc.call_id,
+          id: fc.callId,
           name: fc.name,
           input: parsedArgs,
         });
+        geminiCallIdToName.set(fc.callId, fc.name);
         const detail = summariseToolDetail(fc.name, parsedArgs);
         toolsUsed.push({ tool: fc.name, ...(detail ? { detail } : {}) });
         console.log(
-          `[agent-loop] function_call: ${fc.name} ${
-            fc.arguments.substring(0, 200)
-          }`,
+          `[agent-loop] function_call: ${fc.name} ${fc.arguments.substring(0, 200)}`,
         );
-      } else if (item.type === "web_search_call") {
-        roundWebSearch = true;
-        toolsUsed.push({ tool: "web_search" });
-        allToolTraces.push({
-          name: "web_search",
-          namespace: "web.search",
-          sideEffect: "read",
-          latencyMs: 0,
-          outcome: "success",
-        });
-        console.log(`[agent-loop] web_search_call`);
+      }
+    } else {
+      // ═══════════════════════ OPENAI PATH ═══════════════════════
+      const reasoningParams = useReasoning
+        ? {
+          reasoning: { effort: roundEffort },
+          include: ["reasoning.encrypted_content"],
+        }
+        : {};
+      const response = await client.responses.create(
+        {
+          model: effectiveModel,
+          instructions: systemPrompt,
+          input: apiInput as Parameters<
+            typeof client.responses.create
+          >[0]["input"],
+          tools: openaiTools as Parameters<
+            typeof client.responses.create
+          >[0]["tools"],
+          max_output_tokens: currentMaxOutputTokens,
+          store: false,
+          ...reasoningParams,
+          ...(useToolChoice ? { tool_choice: useToolChoice } : {}),
+        } as Parameters<typeof client.responses.create>[0],
+      );
+      openaiResponse = response;
+
+      const usage = (response as Record<string, unknown>).usage as
+        | Record<string, number>
+        | undefined;
+      roundInputTokens = usage?.input_tokens ?? 0;
+      roundOutputTokens = usage?.output_tokens ?? 0;
+      roundText = response.output_text ?? "";
+      responseStatus = response.status;
+      responseOutputLength = response.output.length;
+
+      for (const item of response.output) {
+        if (item.type === "function_call") {
+          const fc = item as unknown as {
+            call_id: string;
+            name: string;
+            arguments: string;
+          };
+          let parsedArgs: Record<string, unknown> = {};
+          try {
+            parsedArgs = JSON.parse(fc.arguments);
+          } catch { /* empty */ }
+          pendingCalls.push({
+            id: fc.call_id,
+            name: fc.name,
+            input: parsedArgs,
+          });
+          const detail = summariseToolDetail(fc.name, parsedArgs);
+          toolsUsed.push({ tool: fc.name, ...(detail ? { detail } : {}) });
+          console.log(
+            `[agent-loop] function_call: ${fc.name} ${
+              fc.arguments.substring(0, 200)
+            }`,
+          );
+        } else if (item.type === "web_search_call") {
+          roundWebSearch = true;
+          toolsUsed.push({ tool: "web_search" });
+          allToolTraces.push({
+            name: "web_search",
+            namespace: "web.search",
+            sideEffect: "read",
+            latencyMs: 0,
+            outcome: "success",
+          });
+          console.log(`[agent-loop] web_search_call`);
+        }
       }
     }
+
+    const apiCallMs = Date.now() - apiCallStart;
+    totalInputTokens += roundInputTokens;
+    totalOutputTokens += roundOutputTokens;
 
     console.log(
       `[agent-loop] round ${roundCount}/${
         maxRounds + 1
-      }: status=${response.status}, items=${response.output.length}, textLen=${roundText.length}, apiMs=${apiCallMs}, tokens=${roundInputTokens}in/${roundOutputTokens}out`,
+      }: status=${responseStatus}, items=${responseOutputLength}, textLen=${roundText.length}, apiMs=${apiCallMs}, tokens=${roundInputTokens}in/${roundOutputTokens}out`,
     );
 
     // Handle incomplete response (reasoning exhausted token budget)
-    if (response.status === "incomplete") {
-      const reason = (response as Record<string, unknown>).incomplete_details as
-        | Record<string, string>
-        | undefined;
-      if (reason?.reason === "max_output_tokens") {
-        if (pendingCalls.length > 0 || roundText.length === 0) {
-          const prevMax = currentMaxOutputTokens;
-          currentMaxOutputTokens = Math.min(currentMaxOutputTokens * 2, 32768);
-          console.log(
-            `[agent-loop] token budget exhausted (text=${roundText.length}), retrying with ${currentMaxOutputTokens}`,
-          );
-          roundTraces.push({
-            round: roundCount,
-            apiLatencyMs: apiCallMs,
-            toolExecLatencyMs: 0,
-            totalRoundMs: Date.now() - roundStart,
-            inputTokens: roundInputTokens,
-            outputTokens: roundOutputTokens,
-            status: response.status,
-            functionCallCount: pendingCalls.length,
-            webSearchCalled: roundWebSearch,
-            textLength: roundText.length,
-            wasRetry: true,
-            retryReason:
-              `max_output_tokens (${prevMax} → ${currentMaxOutputTokens})`,
-            maxOutputTokens: prevMax,
-            reasoningEffort: roundEffort,
-          });
-          continue;
-        }
-        finalText = roundText;
+    if (responseStatus === "incomplete") {
+      if (pendingCalls.length > 0 || roundText.length === 0) {
+        const prevMax = currentMaxOutputTokens;
+        currentMaxOutputTokens = Math.min(currentMaxOutputTokens * 2, 32768);
+        console.log(
+          `[agent-loop] token budget exhausted (text=${roundText.length}), retrying with ${currentMaxOutputTokens}`,
+        );
         roundTraces.push({
           round: roundCount,
           apiLatencyMs: apiCallMs,
@@ -380,28 +431,47 @@ export async function runAgentLoop(
           totalRoundMs: Date.now() - roundStart,
           inputTokens: roundInputTokens,
           outputTokens: roundOutputTokens,
-          status: "incomplete_accepted",
-          functionCallCount: 0,
+          status: responseStatus,
+          functionCallCount: pendingCalls.length,
           webSearchCalled: roundWebSearch,
           textLength: roundText.length,
-          wasRetry: false,
-          maxOutputTokens: currentMaxOutputTokens,
+          wasRetry: true,
+          retryReason:
+            `max_output_tokens (${prevMax} → ${currentMaxOutputTokens})`,
+          maxOutputTokens: prevMax,
           reasoningEffort: roundEffort,
         });
-        break;
+        continue;
       }
+      finalText = roundText;
+      roundTraces.push({
+        round: roundCount,
+        apiLatencyMs: apiCallMs,
+        toolExecLatencyMs: 0,
+        totalRoundMs: Date.now() - roundStart,
+        inputTokens: roundInputTokens,
+        outputTokens: roundOutputTokens,
+        status: "incomplete_accepted",
+        functionCallCount: 0,
+        webSearchCalled: roundWebSearch,
+        textLength: roundText.length,
+        wasRetry: false,
+        maxOutputTokens: currentMaxOutputTokens,
+        reasoningEffort: roundEffort,
+      });
+      break;
     }
 
-    // Reasoning model spent entire budget on reasoning/search with no text output
+    // Model spent entire budget on reasoning/search with no text output
     if (
       pendingCalls.length === 0 && roundText.length === 0 &&
-      response.output.length > 0
+      responseOutputLength > 0
     ) {
       if (currentMaxOutputTokens < 32768) {
         const prevMax = currentMaxOutputTokens;
         currentMaxOutputTokens = Math.min(currentMaxOutputTokens * 2, 32768);
         console.warn(
-          `[agent-loop] no text produced despite ${response.output.length} output items, retrying with ${currentMaxOutputTokens} tokens`,
+          `[agent-loop] no text produced despite ${responseOutputLength} output items, retrying with ${currentMaxOutputTokens} tokens`,
         );
         roundTraces.push({
           round: roundCount,
@@ -434,7 +504,7 @@ export async function runAgentLoop(
         totalRoundMs: Date.now() - roundStart,
         inputTokens: roundInputTokens,
         outputTokens: roundOutputTokens,
-        status: response.status,
+        status: responseStatus,
         functionCallCount: 0,
         webSearchCalled: roundWebSearch,
         textLength: roundText.length,
@@ -473,7 +543,7 @@ export async function runAgentLoop(
       totalRoundMs: Date.now() - roundStart,
       inputTokens: roundInputTokens,
       outputTokens: roundOutputTokens,
-      status: response.status,
+      status: responseStatus,
       functionCallCount: pendingCalls.length,
       webSearchCalled: roundWebSearch,
       textLength: roundText.length,
@@ -482,9 +552,19 @@ export async function runAgentLoop(
       reasoningEffort: roundEffort,
     });
 
-    // Feed back all output items (preserves reasoning) + tool results
-    apiInput.push(...response.output as unknown as Record<string, unknown>[]);
-    apiInput.push(...toolResults);
+    // Feed back model output + tool results for next round
+    if (useGemini) {
+      geminiContents.push(modelPartsToGeminiContent(geminiRawParts));
+      geminiContents.push(
+        toGeminiFunctionResponses(
+          toolResults as Array<{ type: string; call_id: string; output: string }>,
+          geminiCallIdToName,
+        ),
+      );
+    } else {
+      apiInput.push(...openaiResponse.output as unknown as Record<string, unknown>[]);
+      apiInput.push(...toolResults);
+    }
   }
 
   const sideEffects = extractSideEffectsFromExecutor(allExecResults);
@@ -589,7 +669,7 @@ function summariseToolDetail(
       return (input.query as string)?.substring(0, 60) ??
         `detail: ${(input.place_id as string)?.substring(0, 30)}`;
     case "web_search":
-      return undefined;
+      return (input.query as string)?.substring(0, 60);
     default:
       return undefined;
   }

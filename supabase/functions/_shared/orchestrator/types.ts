@@ -1,85 +1,94 @@
-import type { Reaction, MessageEffect, MessageService, ExtractedMedia } from '../sendblue.ts';
 import type {
-  StoredMessage,
-  MemoryItem,
-  ConversationSummary,
-  ToolTrace,
-  UserProfile,
+  ExtractedMedia,
+  MessageEffect,
+  MessageService,
+  Reaction,
+} from "../sendblue.ts";
+import type {
   ConnectedAccount,
+  ConversationSummary,
+  MemoryItem,
   NestUser,
   PendingEmailSendAction,
-} from '../state.ts';
-import type { InputMessage, InputContentPart, ModelTier } from '../ai/models.ts';
+  StoredMessage,
+  ToolTrace,
+  UserProfile,
+} from "../state.ts";
+import type {
+  InputContentPart,
+  InputMessage,
+  ModelTier,
+} from "../ai/models.ts";
 
 // ═══════════════════════════════════════════════════════════════
 // Agent taxonomy
 // ═══════════════════════════════════════════════════════════════
 
 export type AgentName =
-  | 'casual'
-  | 'productivity'
-  | 'research'
-  | 'recall'
-  | 'operator'
-  | 'onboard'
-  | 'meeting_prep'
-  | 'chat'
-  | 'smart';
+  | "casual"
+  | "productivity"
+  | "research"
+  | "recall"
+  | "operator"
+  | "onboard"
+  | "meeting_prep"
+  | "chat"
+  | "smart";
 
 // ═══════════════════════════════════════════════════════════════
 // Tool namespaces & side-effect classification
 // ═══════════════════════════════════════════════════════════════
 
 export type ToolNamespace =
-  | 'memory.read'
-  | 'memory.write'
-  | 'email.read'
-  | 'email.write'
-  | 'calendar.read'
-  | 'calendar.write'
-  | 'contacts.read'
-  | 'granola.read'
-  | 'web.search'
-  | 'knowledge.search'
-  | 'messaging.react'
-  | 'messaging.effect'
-  | 'media.generate'
-  | 'travel.search'
-  | 'admin.internal';
+  | "memory.read"
+  | "memory.write"
+  | "email.read"
+  | "email.write"
+  | "calendar.read"
+  | "calendar.write"
+  | "contacts.read"
+  | "granola.read"
+  | "web.search"
+  | "knowledge.search"
+  | "messaging.react"
+  | "messaging.effect"
+  | "media.generate"
+  | "travel.search"
+  | "admin.internal";
 
-export type SideEffect = 'read' | 'draft' | 'commit';
+export type SideEffect = "read" | "draft" | "commit";
 
 // ═══════════════════════════════════════════════════════════════
 // Option A: Domain classification & capability-based routing
 // ═══════════════════════════════════════════════════════════════
 
 export type DomainTag =
-  | 'email'
-  | 'calendar'
-  | 'meeting_prep'
-  | 'research'
-  | 'recall'
-  | 'contacts'
-  | 'general';
+  | "email"
+  | "calendar"
+  | "meeting_prep"
+  | "research"
+  | "recall"
+  | "contacts"
+  | "general";
 
 export type Capability =
-  | 'email.read'
-  | 'email.write'
-  | 'calendar.read'
-  | 'calendar.write'
-  | 'contacts.read'
-  | 'granola.read'
-  | 'web.search'
-  | 'knowledge.search'
-  | 'memory.read'
-  | 'memory.write'
-  | 'travel.search'
-  | 'deep_profile';
+  | "email.read"
+  | "email.write"
+  | "calendar.read"
+  | "calendar.write"
+  | "contacts.read"
+  | "granola.read"
+  | "web.search"
+  | "knowledge.search"
+  | "memory.read"
+  | "memory.write"
+  | "travel.search"
+  | "deep_profile";
 
-export type MemoryDepth = 'none' | 'light' | 'full';
+export type MemoryDepth = "none" | "light" | "full";
 
 export interface ClassifierResult {
-  mode: 'chat' | 'smart';
+  mode: "chat" | "smart";
   primaryDomain: DomainTag;
   secondaryDomains?: DomainTag[];
   confidence: number;
@@ -96,15 +105,22 @@ export interface ClassifierResult {
 // Prompt composition
 // ═══════════════════════════════════════════════════════════════
 
-export type PromptLayer = 'identity' | 'agent' | 'context' | 'turn';
+export type PromptLayer =
+  | "identity"
+  | "conversation_behavior"
+  | "memory_continuity"
+  | "message_shaping"
+  | "agent"
+  | "context"
+  | "turn";
 
 // ═══════════════════════════════════════════════════════════════
 // Routing
 // ═══════════════════════════════════════════════════════════════
 
-export type RouteMode = 'direct' | 'single_agent' | 'onboard';
+export type RouteMode = "direct" | "single_agent" | "onboard";
 
-export type UserStyle = 'brief' | 'normal' | 'deep';
+export type UserStyle = "brief" | "normal" | "deep";
 
 export interface RouteDecision {
   mode: RouteMode;
@@ -117,19 +133,19 @@ export interface RouteDecision {
   confidence: number;
   fastPathUsed: boolean;
   routerLatencyMs: number;
-  modelTierOverride?: import('../ai/models.ts').ModelTier;
-  confirmationState?: 'confirmed' | 'not_confirmation' | 'not_checked';
+  modelTierOverride?: import("../ai/models.ts").ModelTier;
+  confirmationState?: "confirmed" | "not_confirmation" | "not_checked";
   // Option A fields (backwards-compatible)
   primaryDomain?: DomainTag;
   secondaryDomains?: DomainTag[];
   classifierResult?: ClassifierResult;
   memoryDepth?: MemoryDepth;
   forcedToolChoice?: string;
-  routeLayer?: '0A' | '0B-casual' | '0B-knowledge' | '0C';
+  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0C";
   routeReason?: string;
   matchedDisqualifierBucket?: string | null;
   hadPendingState?: boolean;
-  reasoningEffortOverride?: import('../ai/models.ts').ReasoningEffort;
+  reasoningEffortOverride?: import("../ai/models.ts").ReasoningEffort;
   modelOverride?: string;
 }
 
@@ -174,7 +190,7 @@ export interface OnboardingClassification {
   shouldAskName: boolean;
   includeTrustReassurance: boolean;
   needsClarification: boolean;
-  emotionalLoad: 'none' | 'low' | 'moderate' | 'high';
+  emotionalLoad: "none" | "low" | "moderate" | "high";
 }
 
 export interface OnboardingContext {
@@ -312,19 +328,23 @@ export interface ToolCallTrace {
   namespace: ToolNamespace;
   sideEffect: SideEffect;
   latencyMs: number;
-  outcome: 'success' | 'error' | 'timeout';
+  outcome: "success" | "error" | "timeout";
   inputSummary?: string;
   approvalGranted?: boolean;
-  approvalMethod?: 'explicit' | 'implicit' | 'exempt';
+  approvalMethod?: "explicit" | "implicit" | "exempt";
   pendingActionId?: number;
-  sendResolutionSource?: 'model_input' | 'pending_action' | 'pending_action_validated' | 'none';
+  sendResolutionSource?:
+    | "model_input"
+    | "pending_action"
+    | "pending_action_validated"
+    | "none";
   pendingActionFailureReason?: string;
 }
 
 export interface ToolCallBlockedTrace {
   name: string;
   namespace: ToolNamespace;
-  reason: 'namespace_denied' | 'side_effect_denied' | 'rate_limited';
+  reason: "namespace_denied" | "side_effect_denied" | "rate_limited";
   detail?: string;
   pendingActionId?: number;
 }
@@ -335,7 +355,7 @@ export interface PendingActionDebug {
   pendingEmailSendStatus: string | null;
   draftIdPresent: boolean;
   accountPresent: boolean;
-  confirmationResult: 'confirmed' | 'not_confirmation' | 'not_checked';
+  confirmationResult: "confirmed" | "not_confirmation" | "not_checked";
 }
 
 export interface ContextSubTimings {
@@ -365,7 +385,7 @@ export interface TurnTrace {
   routeDecision: RouteDecision;
   // Option A observability
   classifierResult?: ClassifierResult;
-  routeLayer?: '0A' | '0B-casual' | '0B-knowledge' | '0C';
+  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0C";
   routeReason?: string;
   matchedDisqualifierBucket?: string | null;
   hadPendingState?: boolean;
@@ -410,7 +430,7 @@ export interface TurnTrace {
   // Overall
   totalLatencyMs: number;
   routerContextMs: number;
-  contextPath: 'full' | 'light' | 'memory-light';
+  contextPath: "full" | "light" | "memory-light";
   pendingActionDebug: PendingActionDebug;
 
   // Full prompt context (for debug dashboard)
@@ -437,5 +457,13 @@ export interface TurnResult {
 }
 
 // Re-export commonly used types from dependencies
-export type { Reaction, MessageEffect, MessageService, ExtractedMedia };
-export type { StoredMessage, MemoryItem, ConversationSummary, ToolTrace, UserProfile, ConnectedAccount, NestUser };
+export type { ExtractedMedia, MessageEffect, MessageService, Reaction };
+export type {
+  ConnectedAccount,
+  ConversationSummary,
+  MemoryItem,
+  NestUser,
+  StoredMessage,
+  ToolTrace,
+  UserProfile,
+};

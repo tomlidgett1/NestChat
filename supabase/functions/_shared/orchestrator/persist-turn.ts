@@ -73,8 +73,6 @@ async function persistTurnTrace(trace: TurnTrace): Promise<void> {
     route_fast_path: trace.routeDecision.fastPathUsed,
     route_latency_ms: trace.routeDecision.routerLatencyMs,
     route_namespaces: trace.routeDecision.allowedNamespaces,
-    route_layer: trace.routeLayer ?? null,
-    route_reason: trace.routeReason ?? null,
 
     system_prompt_length: trace.systemPromptLength,
     system_prompt_hash: trace.systemPromptHash,

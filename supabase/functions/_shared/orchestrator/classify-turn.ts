@@ -30,14 +30,14 @@ Given the user's message, recent conversation context, and pending action state,
 }
 
 ## Mode rules
-- "chat": casual conversation, banter, emotional support, greetings, jokes, life advice, creative writing, general knowledge questions that don't need tools. Use gpt-4.1-mini (fast, no reasoning).
+- "chat": casual conversation, banter, emotional support, greetings, jokes, life advice, creative writing, general knowledge questions that don't need tools. Uses gemini-3.1-flash-lite-preview (fast, no reasoning).
 - "smart": anything requiring tools, account data, personal context retrieval, multi-step tasks, or domain expertise. This includes ALL location/travel/places queries (restaurants, directions, travel times, transit, "where is", "how long to get to", "best X near Y", etc.) because these need live data from travel.search tools. Use gpt-5.2 (reasoning model).
 
 When in doubt between chat and smart, prefer smart. It's better to over-qualify than to under-serve.
 
 ## Domain rules
 - "email": reading, searching, drafting, sending, or managing emails
-- "calendar": viewing, creating, updating, or deleting calendar events; schedule queries
+- "calendar": viewing, creating, updating, or deleting calendar events; schedule queries. KEY: if the user asks about a flight, booking, reservation, or trip that might not be on the calendar, include email.read and knowledge.search as capabilities so the agent can fall back to searching email confirmations and the knowledge base.
 - "meeting_prep": preparing for meetings, briefing, meeting notes recall. KEY: any question about "what did [person] and I discuss", "what was said in our call/meeting/1:1/standup", "brief me for", "prep me for" → meeting_prep. Always include granola.read capability for meeting_prep.
 - "research": factual questions needing current/live data, current events, news, web lookups, comparisons. KEY: if the question is about current events, recent news, live data, or anything that changes over time → research with web.search capability. "Who is the president of X?" needs web.search for current accuracy.
 - "recall": what Nest knows/remembers about the user, personal memory retrieval, "what did I tell you", user preferences, personal facts

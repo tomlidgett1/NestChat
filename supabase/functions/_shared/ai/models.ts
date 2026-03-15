@@ -1,4 +1,6 @@
 import OpenAI from 'npm:openai@6.27.0';
+import { geminiSimpleText, isGeminiModel } from './gemini.ts';
+export { isGeminiModel } from './gemini.ts';
 
 // ═══════════════════════════════════════════════════════════════
 // Model tiers — change any model with a single-line edit
@@ -11,7 +13,7 @@ import OpenAI from 'npm:openai@6.27.0';
 export type ModelTier = 'fast' | 'agent' | 'orchestration';
 
 export const MODEL_MAP: Record<ModelTier, string> = {
-  fast: 'gpt-4.1-mini',
+  fast: 'gemini-3.1-flash-lite-preview',
   agent: 'gpt-5.2',
   orchestration: 'gpt-5-nano',
 };
@@ -120,20 +122,34 @@ export async function classifyConfirmation(
   }
 
   try {
-    const client = getOpenAIClient();
+    const fastModel = MODEL_MAP.fast;
     const start = Date.now();
-    const response = await client.responses.create({
-      model: MODEL_MAP.fast,
-      instructions: CONFIRM_CLASSIFIER_PROMPT,
-      input: [
-        { role: 'assistant', content: assistantContext.substring(0, 500) },
-        { role: 'user', content: userMessage.substring(0, 200) },
-      ],
-      max_output_tokens: 16,
-      store: false,
-    } as Parameters<typeof client.responses.create>[0]);
+    let answer: string;
+
+    if (isGeminiModel(fastModel)) {
+      const result = await geminiSimpleText({
+        model: fastModel,
+        systemPrompt: CONFIRM_CLASSIFIER_PROMPT,
+        userMessage: `Assistant said: ${assistantContext.substring(0, 500)}\n\nUser replied: ${userMessage.substring(0, 200)}`,
+        maxOutputTokens: 16,
+      });
+      answer = result.text.trim().toLowerCase();
+    } else {
+      const client = getOpenAIClient();
+      const response = await client.responses.create({
+        model: fastModel,
+        instructions: CONFIRM_CLASSIFIER_PROMPT,
+        input: [
+          { role: 'assistant', content: assistantContext.substring(0, 500) },
+          { role: 'user', content: userMessage.substring(0, 200) },
+        ],
+        max_output_tokens: 16,
+        store: false,
+      } as Parameters<typeof client.responses.create>[0]);
+      answer = (response.output_text ?? '').trim().toLowerCase();
+    }
+
     const ms = Date.now() - start;
-    const answer = (response.output_text ?? '').trim().toLowerCase();
     const isConfirm = answer.startsWith('yes') || answer === 'y';
     console.log(`[confirm-classifier] "${userMessage}" → ${isConfirm ? 'CONFIRMED' : 'NOT confirmed'} (${ms}ms, raw: "${answer}")`);
     _confirmCache.set(cacheKey, isConfirm);
