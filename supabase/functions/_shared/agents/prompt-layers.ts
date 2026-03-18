@@ -32,6 +32,7 @@ import {
   MESSAGE_SHAPING_LAYER,
 } from "./message-shaping.ts";
 import { COMPACT_CASUAL_MODE_LAYER } from "./mode-casual.ts";
+import { COMPACT_RESEARCH_MODE_LAYER } from "./mode-task.ts";
 import { formatRelativeTime } from "../utils/format.ts";
 import { getOptionalEnv } from "../env.ts";
 
@@ -147,10 +148,8 @@ function formatToolTracesForPrompt(traces: ToolTrace[]): string {
 }
 
 const SCOPE_LABELS: Record<string, string> = {
-  "https://www.googleapis.com/auth/calendar": "calendar",
   "https://www.googleapis.com/auth/calendar.events": "calendar",
   "https://www.googleapis.com/auth/gmail.modify": "email",
-  "https://www.googleapis.com/auth/gmail.send": "email",
   "https://www.googleapis.com/auth/gmail.readonly": "email",
   "https://www.googleapis.com/auth/contacts.readonly": "contacts",
   "https://www.googleapis.com/auth/contacts.other.readonly": "contacts",
@@ -605,6 +604,18 @@ function buildContextLayer(context: TurnContext, input: TurnInput): string {
     );
   }
 
+  // Group chat awareness nudge for DM users in the 20-40 message range
+  if (
+    !input.isOnboarding &&
+    !input.isGroupChat &&
+    context.summaries.length >= 1 &&
+    context.summaries.length <= 3
+  ) {
+    sections.push(
+      `Group chat tip (mention ONCE if it comes up naturally, don't force it)\nNest can be added to group chats too. If the conversation touches on friends, teams, or group plans, you can casually mention it. Reassure them that DM conversations are completely private and never shared with or visible in group chats. Only mention this once, ever. If you've already mentioned it in this conversation or a prior one, don't repeat it.`,
+    );
+  }
+
   return sections.join("\n\n");
 }
 
@@ -759,7 +770,7 @@ function formatLocalDateTime(now: Date, tz: string): string {
     now.toLocaleString("en-AU", { timeZone: tz, timeZoneName: "short" }).split(
       " ",
     ).pop() ?? tz;
-  return `Current date and time: ${formatted} ${shortTz} (${tz})`;
+  return `Current date and time: ${formatted} ${shortTz} (${tz}). If the user asks the time, use this exact time, do not round or adjust it.`;
 }
 
 function buildTurnLayer(input: TurnInput, context?: TurnContext): string {
@@ -782,33 +793,18 @@ function buildTurnLayer(input: TurnInput, context?: TurnContext): string {
       );
     }
   } else {
-    const dayNames = [
-      "Sunday",
-      "Monday",
-      "Tuesday",
-      "Wednesday",
-      "Thursday",
-      "Friday",
-      "Saturday",
-    ];
-    const monthNames = [
-      "January",
-      "February",
-      "March",
-      "April",
-      "May",
-      "June",
-      "July",
-      "August",
-      "September",
-      "October",
-      "November",
-      "December",
-    ];
+    const utcFormatted = now.toLocaleString("en-AU", {
+      timeZone: "UTC",
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
     sections.push(
-      `Current date: ${dayNames[now.getUTCDay()]}, ${now.getUTCDate()} ${
-        monthNames[now.getUTCMonth()]
-      } ${now.getUTCFullYear()}. The user's timezone is unknown, so do not state a specific local time. If they ask the time, ask where they are.`,
+      `Current date and time: ${utcFormatted} UTC. The user's timezone is unknown, so do not state a specific local time. If they ask the time, ask where they are.`,
     );
   }
 
@@ -818,7 +814,7 @@ function buildTurnLayer(input: TurnInput, context?: TurnContext): string {
       ? `"${input.chatName}"`
       : "an unnamed group";
     sections.push(
-      `Group Chat Context\nYou're in a group chat called ${chatName} with these participants: ${participants}\n\nIn group chats: address people by name when responding to them specifically. Be aware others can see your responses. Keep responses even shorter since group chats move fast. Dont react as often in groups, it can feel spammy.`,
+      `Group Chat Context\nYou're in a group chat called ${chatName} with these participants: ${participants}\n\nIn group chats: address people by name when responding to them specifically. Be aware others can see your responses. Keep responses even shorter since group chats move fast. Dont react as often in groups, it can feel spammy.\n\nWhen the group is busy (multiple people chatting), your reply is automatically sent as a threaded reply to the message that triggered you. The recipient already sees which message you're responding to, so don't re-quote or re-reference it — just respond directly.`,
     );
   }
 
@@ -838,7 +834,7 @@ function buildTurnLayer(input: TurnInput, context?: TurnContext): string {
     let serviceNote =
       `Messaging Platform\nThis conversation is happening over ${input.service}.`;
     if (input.service === "iMessage") {
-      serviceNote += " Reactions and expressive effects can work here.";
+      serviceNote += " Reactions (any emoji) and expressive effects can work here.";
     } else if (input.service === "RCS") {
       serviceNote +=
         " Prefer plain text and media. Avoid assuming expressive effects or typing indicators are available.";
@@ -952,36 +948,67 @@ function buildOnboardingLayer(input: TurnInput): string {
   const messageCount = nestUser.onboardCount;
   const userTurnNumber = messageCount + 1;
   const isFirstMessage = messageCount <= 1;
-  const isEarlyConversation = userTurnNumber <= 3;
-  const shouldForceVerificationNow = userTurnNumber >= 4 && userTurnNumber <= 5;
   const alreadySentVerification = nestUser.onboardMessages.some((m) =>
     m.role === "assistant" && m.content.includes("https://nest.expert/")
   );
 
   const sections: string[] = [];
 
-  sections.push(
-    `Onboarding Context\nThis is a NEW user who hasn't verified yet. Your only job: keep the user engaged and wanting to text Nest again.`,
-  );
-
+  // Turn-aware question cadence
+  const isStatementTurn = !isFirstMessage && (userTurnNumber % 2 === 0);
   if (isFirstMessage) {
-    sections.push(`First Message Guidance
-This is the user's very first message to Nest.
-Your opener must be unusually engaging. It should feel interesting straight away, not generic or polite-by-default.
-Lead with a sharp, slightly cheeky line that creates curiosity or momentum, then respond directly to what they said.
-Do NOT open with "hey", "hi", "how can I help?", "what can I do for you?", or anything that sounds like support.
-Keep it under 30 words per bubble.
-Do not pitch features.
+    sections.push(`## REPLY CONSTRAINT\nYou may ask ONE question in this reply.`);
+  } else if (isStatementTurn) {
+    sections.push(`## REPLY CONSTRAINT — NO QUESTIONS\nThis is turn ${userTurnNumber}. You are FORBIDDEN from including any question marks (?) in your reply. Do not ask anything. Make statements only — react, affirm, observe, deliver value. If you catch yourself writing a "?", delete it and rephrase as a statement. This is a hard rule, not a suggestion.`);
+  } else {
+    sections.push(`## REPLY CONSTRAINT\nYou may ask at most ONE question in this reply, but only if it genuinely deepens the conversation. A pure statement is preferred. Never ask more than one question.`);
+  }
 
-EXTRACTION: Your opener MUST end with one intriguing question that pulls something real out of them.
-- "tell me something interesting about you"
+  // ─── Phase-based verification logic ─────────────────────────────────────
+  if (isFirstMessage) {
+    sections.push(`## VERIFICATION (PHASE 1 — FIRST MESSAGE)
+This is the user's very first message. You MUST ask for verification in your first reply.
 
-Default behaviour: use "tell me something interesting about you" as your first question.
-If they reply with something bland, generic, or low-effort, push back playfully and ask again for something genuinely interesting.
-Keep the pushback cheeky, confident, and brief, never mean.
+Structure your reply like this:
+1. A sharp, engaging opener that responds to what they actually said (keep it brief and interesting)
+2. Naturally transition into asking them to verify — generate this fresh based on the conversation, don't use a scripted line. It should feel like a casual aside, not a gate.
+3. After the verification ask, add one engaging line or question to keep momentum.
 
-If they already told you something specific, skip the question and show value immediately.
-The goal: keep them wanting to continue the thread while showing fast, specific value. Never use "what's on your plate".`);
+The system will automatically append the verification link — do NOT include the URL yourself.
+
+The verification ask should feel like a quick formality woven into the conversation, not a corporate checkpoint. Keep it casual, confident, and contextual to what they just said.`);
+  } else if (alreadySentVerification) {
+    sections.push(`## VERIFICATION — ALREADY SENT
+You already asked for verification. Be genuinely helpful — answer questions, give advice, draft things, search the web. Show value and build momentum.
+You do NOT need to mention verification on every message.
+But if they ask about a verification-gated feature (reminders, calendar, email), tell them that specific feature needs verification and put the link in its own separate bubble using --- before it:
+
+---
+${onboardUrl}`);
+  } else {
+    sections.push(`## VERIFICATION (PHASE 1 — VERIFICATION NOT YET SENT)
+The verification link hasn't been sent yet. You MUST include a verification prompt in this reply.
+Work a verification ask into your message naturally — generate it fresh based on the conversation context, don't use a scripted line. Put the link in its own separate bubble using --- before it:
+
+---
+${onboardUrl}`);
+  }
+
+  // ─── Verification-gated features (always active) ────────────────────────
+  sections.push(`## Verification-Gated Features
+Reminders, follow-ups, calendar, and email access ALL require verification. If the user asks for ANY of these — even casually — you MUST tell them that's exactly what you do, but verification is needed first. Don't pretend you'll set it up. Put the link in its own separate bubble using --- before it:
+
+---
+${onboardUrl}
+
+"I've verified" claims: You are ONLY talking to this user because they have NOT verified. The system has checked. If they claim otherwise, gently let them know it's not showing on your end and offer the link again.`);
+
+  // ─── Contextual layers ──────────────────────────────────────────────────
+  if (isFirstMessage) {
+    sections.push(`## First Message Style
+Your opener must feel sharp and alive. Never sound generic, corporate, or overly polite. Avoid "hey", "hi", "how can I help?".
+Keep it under 30 words per bubble. Do not pitch features.
+After the verification ask, end with something playful and forward-looking that makes them want to reply. Include a semi-joking line about what you can get up to once they verify - something like "once that's done we can solve the world's problems" or "verify and we can start fixing your life" or "once you're in we can take over the world". Keep it light, funny, and confident - not corporate.`);
   }
 
   if (pdlContext) {
@@ -1004,35 +1031,8 @@ The goal: keep them wanting to continue the thread while showing fast, specific 
     `Rescue Logic\nIf the user seems stuck or unsure what to do, suggest:\n"You can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it"`,
   );
 
-  let verificationBlock: string;
-  if (isFirstMessage) {
-    verificationBlock =
-      `DO NOT include the verification link. Focus entirely on being useful.`;
-  } else if (isEarlyConversation) {
-    verificationBlock =
-      `Only include the verification link if they explicitly ask how to sign up or get started. Otherwise, keep being useful.`;
-  } else if (shouldForceVerificationNow && !alreadySentVerification) {
-    verificationBlock =
-      `This turn is user message #${userTurnNumber}. You MUST include a verification prompt now.
-
-Use this exact vibe in its own bubble:
-"quick one - i just need to confirm you're a human"
-
-Then put the verification link in its own separate bubble on its own line:
-
-${onboardUrl}
-
-Do not add extra text in the link bubble.`;
-  } else if (userTurnNumber > 5) {
-    verificationBlock =
-      `You can naturally work in the verification link now. Frame it as "quick 30 second thing to unlock everything" or similar. Put the link on its own line:\n\n${onboardUrl}\n\nDon't include it if you already sent it in a previous message. Only include it again if they ask.\nIf they explicitly ask to sign up, verify, or get started, always include the link.`;
-  } else {
-    verificationBlock =
-      `Only include the verification link if they explicitly ask:\n\n${onboardUrl}`;
-  }
-
   sections.push(
-    `Verification Link Rules\n${verificationBlock}\n\nFRAMING: Never say "connect your Google account" or "create an account." Frame it as "quick verification", "verify you're human", or "unlock the full experience".\nFORMAT: Always put the link on its own line, never embedded in text.`,
+    `Verification Link Formatting\nFRAMING: Never say "connect your Google account" or "create an account." Frame it as "quick verification", "verify you're human", or "unlock the full experience".\nFORMAT: The link MUST ALWAYS go in its own separate bubble — never in the same message as other text. Use --- before the link to force a bubble split. Never embed the link inline with other words.`,
   );
 
   return sections.join("\n\n");
@@ -1118,14 +1118,18 @@ export function composeCompactPrompt(
       );
     }
   } else {
-    const today = now.toLocaleDateString("en-AU", {
+    const todayTime = now.toLocaleString("en-AU", {
+      timeZone: "UTC",
       weekday: "short",
       day: "numeric",
       month: "short",
       year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
     });
     sections.push(
-      `Today: ${today}. The user's timezone is unknown, so do not guess their local time.`,
+      `Now: ${todayTime} UTC. The user's timezone is unknown, so do not guess their local time.`,
     );
   }
 
@@ -1140,6 +1144,81 @@ export function composeCompactPrompt(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Research-lite prompt — for 0B-research fast lane
+// Compact identity/behaviour + research mode layer + minimal context.
+// Skips deep profile, summaries, tool traces, and heavy context
+// blocks.  ~2-3K chars vs ~18K for the full prompt.
+// ═══════════════════════════════════════════════════════════════
+
+export function composeResearchLitePrompt(
+  context: TurnContext,
+  input: TurnInput,
+): string {
+  const sections: string[] = [
+    COMPACT_IDENTITY_LAYER,
+    COMPACT_CONVERSATION_BEHAVIOR_LAYER,
+    COMPACT_MEMORY_CONTINUITY_LAYER,
+    COMPACT_MESSAGE_SHAPING_LAYER,
+    COMPACT_RESEARCH_MODE_LAYER,
+  ];
+
+  if (input.senderHandle && context.senderProfile?.name) {
+    sections.push(
+      `User: ${context.senderProfile.name} (${input.senderHandle})`,
+    );
+  } else if (input.senderHandle) {
+    sections.push(`User handle: ${input.senderHandle}`);
+  }
+
+  if (context.connectedAccounts.length > 0) {
+    let acctBlock = `Connected accounts`;
+    for (const acct of context.connectedAccounts) {
+      const label = acct.provider.charAt(0).toUpperCase() +
+        acct.provider.slice(1);
+      const primaryTag = acct.isPrimary ? " (primary)" : "";
+      acctBlock += `\n${label}${primaryTag}: ${acct.email}`;
+    }
+    sections.push(acctBlock);
+  }
+
+  const now = new Date();
+  const tz = resolveUserTimezone(input, context);
+  if (tz) {
+    try {
+      const timeStr = now.toLocaleString("en-AU", {
+        timeZone: tz,
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      });
+      sections.push(`Now: ${timeStr} (${tz})`);
+    } catch {
+      sections.push(`Timezone: ${tz}.`);
+    }
+  } else {
+    const todayTime = now.toLocaleString("en-AU", {
+      timeZone: "UTC",
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+    sections.push(
+      `Now: ${todayTime} UTC. The user's timezone is unknown.`,
+    );
+  }
+
+  return sections.join("\n");
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Domain block builder — for Option A Smart Agent prompt composition
 // ═══════════════════════════════════════════════════════════════
 
@@ -1147,13 +1226,14 @@ function buildDomainLayers(
   primaryDomain: DomainTag,
   secondaryDomains?: DomainTag[],
   capabilities?: Capability[],
+  deepProfileSnapshot?: Record<string, unknown> | null,
 ): string {
   const sections: string[] = [];
 
   sections.push(getDomainInstructions(primaryDomain));
 
   if (capabilities?.includes("deep_profile")) {
-    sections.push(getDeepProfileInstructions());
+    sections.push(getDeepProfileInstructions(deepProfileSnapshot));
   }
 
   if (capabilities?.includes("travel.search")) {
@@ -1193,8 +1273,11 @@ export function composePrompt(
   ];
 
   if (primaryDomain && agent.name === "smart") {
+    const snapshot = capabilities?.includes("deep_profile")
+      ? context.senderProfile?.deepProfileSnapshot ?? null
+      : null;
     layers.push(
-      buildDomainLayers(primaryDomain, secondaryDomains, capabilities),
+      buildDomainLayers(primaryDomain, secondaryDomains, capabilities, snapshot),
     );
   }
 

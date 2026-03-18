@@ -2,7 +2,57 @@
 // Ref: https://apidocs.linqapp.com
 
 import { getListEnv, getOptionalEnv, requireEnv } from './env.ts';
-import type { NormalisedIncomingMessage, MessageService, MessageEffect, ExtractedMedia, Reaction } from './sendblue.ts';
+
+// ─── Shared messaging types (canonical definitions) ──────────────────────────
+
+export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
+export type ReactionType = StandardReactionType | 'custom';
+export type MessageService = 'iMessage' | 'SMS' | 'RCS';
+
+export type MessageEffect = { type: 'screen' | 'bubble'; name: string };
+
+export interface ExtractedMedia {
+  url: string;
+  mimeType: string;
+}
+
+export type Reaction = {
+  type: StandardReactionType;
+} | {
+  type: 'custom';
+  emoji: string;
+};
+
+export interface MediaAttachment {
+  url: string;
+}
+
+export interface NormalisedIncomingMessage {
+  chatId: string;
+  from: string;
+  text: string;
+  messageId: string;
+  images: ExtractedMedia[];
+  audio: ExtractedMedia[];
+  incomingEffect?: MessageEffect;
+  service?: MessageService;
+  isGroupChat: boolean;
+  participantNames: string[];
+  chatName: string | null;
+  provider: 'linq';
+  conversation: ConversationTarget;
+}
+
+export interface ConversationTarget {
+  chatId: string;
+  fromNumber: string;
+  recipientNumber: string;
+  isGroupChat: boolean;
+  groupId: string | null;
+  participants: string[];
+  chatName: string | null;
+  service?: MessageService;
+}
 
 const BASE_URL = getOptionalEnv('LINQ_API_BASE_URL') || 'https://api.linqapp.com/api/partner/v3';
 
@@ -44,6 +94,10 @@ const chatInfoCache = new Map<string, ChatInfo>();
 export interface ChatHandle {
   handle: string;
   service: string;
+  is_me?: boolean;
+  status?: string;
+  joined_at?: string;
+  left_at?: string | null;
 }
 
 export interface ChatInfo {
@@ -181,7 +235,7 @@ function normaliseService(service?: string): MessageService | undefined {
   return undefined;
 }
 
-export function normaliseLinqMessage(event: MessageReceivedEvent): NormalisedIncomingMessage | null {
+export async function normaliseLinqMessage(event: MessageReceivedEvent): Promise<NormalisedIncomingMessage | null> {
   const { data } = event;
 
   // Skip our own outbound messages
@@ -199,10 +253,22 @@ export function normaliseLinqMessage(event: MessageReceivedEvent): NormalisedInc
   const audio = extractAudioUrls(data.parts || []);
   const service = normaliseService(data.service);
 
-  // Group detection from the chat object in the webhook payload
   const isGroupChat = data.chat?.is_group ?? false;
-  const participants = [from, botNumber];
-  const chatName: string | null = null;
+  let participants = [from, botNumber];
+  let chatName: string | null = null;
+
+  // For group chats, enrich with full participant list from Linq API
+  if (isGroupChat) {
+    try {
+      const chatInfo = await getChat(chatId);
+      participants = chatInfo.handles
+        .filter(h => !h.is_me)
+        .map(h => h.handle);
+      chatName = chatInfo.display_name ?? null;
+    } catch (err) {
+      console.warn('[linq] Failed to enrich group participants:', (err as Error).message);
+    }
+  }
 
   const incomingEffect = data.effect
     ? { type: data.effect.type, name: data.effect.name }
@@ -234,6 +300,42 @@ export function normaliseLinqMessage(event: MessageReceivedEvent): NormalisedInc
   };
 }
 
+// ─── Create chat (sends initial message) ─────────────────────────────────────
+
+export interface LinqCreateChatResponse {
+  chat: {
+    id: string;
+    display_name: string | null;
+    service: string;
+    is_group: boolean;
+    message: {
+      id: string;
+      parts: Array<{ type: string; value?: string }>;
+      sent_at: string;
+      delivery_status: 'pending' | 'queued' | 'sent' | 'delivered' | 'failed';
+      is_read: boolean;
+    };
+  };
+}
+
+export async function createChat(
+  from: string,
+  to: string[],
+  text: string,
+): Promise<LinqCreateChatResponse> {
+  return sendRequest<LinqCreateChatResponse>('/chats', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from,
+      to,
+      message: {
+        parts: [{ type: 'text', value: text }],
+      },
+    }),
+  });
+}
+
 // ─── Send message ────────────────────────────────────────────────────────────
 
 export interface LinqSendMessageResponse {
@@ -256,6 +358,7 @@ export async function sendMessage(
   text: string,
   effect?: MessageEffect,
   media?: LinqMediaAttachment[],
+  replyTo?: ReplyTo,
 ): Promise<LinqSendMessageResponse> {
   const parts: Array<{ type: string; value?: string; url?: string }> = [];
 
@@ -271,6 +374,7 @@ export async function sendMessage(
 
   const message: Record<string, unknown> = { parts };
   if (effect) message.effect = effect;
+  if (replyTo) message.reply_to = replyTo;
 
   return sendRequest<LinqSendMessageResponse>(`/chats/${chatId}/messages`, {
     method: 'POST',
@@ -329,9 +433,18 @@ export async function shareContactCard(chatId: string): Promise<void> {
   await sendRequest(`/chats/${chatId}/share_contact_card`, { method: 'POST' });
 }
 
-// ─── Sender filtering (mirrors sendblue.ts pattern) ─────────────────────────
+// ─── Sender filtering ────────────────────────────────────────────────────────
 
 export function shouldProcessLinqBotNumber(botNumber: string): boolean {
   const allowedBotNumbers = getListEnv('LINQ_AGENT_BOT_NUMBERS');
   return allowedBotNumbers.length === 0 || allowedBotNumbers.includes(botNumber);
+}
+
+export function isAllowedSender(handle: string): boolean {
+  const allowedSenders = getListEnv('ALLOWED_SENDERS');
+  return allowedSenders.length === 0 || allowedSenders.includes(handle);
+}
+
+export function isIgnoredSender(handle: string): boolean {
+  return getListEnv('IGNORED_SENDERS').includes(handle);
 }

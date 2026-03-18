@@ -1,7 +1,7 @@
 import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from './ai/models.ts';
+import { isGeminiModel } from './ai/models.ts';
+import { geminiSimpleText } from './ai/gemini.ts';
 import type { EntryState, ValueWedge } from './state.ts';
-
-const client = getOpenAIClient();
 
 export interface ClassificationResult {
   entryState: EntryState;
@@ -52,16 +52,30 @@ export async function classifyEntryState(message: string, pdlContext?: string): 
     : `User message: "${message}"`;
 
   try {
-    const response = await client.responses.create({
-      model: MODEL_MAP.orchestration,
-      instructions: CLASSIFIER_INSTRUCTIONS,
-      input: userContent,
-      max_output_tokens: 1024,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.orchestration },
-    } as Parameters<typeof client.responses.create>[0]);
+    const model = MODEL_MAP.orchestration;
+    let text: string | undefined;
 
-    const text = response.output_text;
+    if (isGeminiModel(model)) {
+      const result = await geminiSimpleText({
+        model,
+        systemPrompt: CLASSIFIER_INSTRUCTIONS,
+        userMessage: userContent,
+        maxOutputTokens: 1024,
+      });
+      text = result.text;
+    } else {
+      const client = getOpenAIClient();
+      const response = await client.responses.create({
+        model,
+        instructions: CLASSIFIER_INSTRUCTIONS,
+        input: userContent,
+        max_output_tokens: 1024,
+        store: false,
+        reasoning: { effort: REASONING_EFFORT.orchestration },
+      } as Parameters<typeof client.responses.create>[0]);
+      text = response.output_text;
+    }
+
     if (!text) return defaultClassification();
 
     let rawText = text.trim();

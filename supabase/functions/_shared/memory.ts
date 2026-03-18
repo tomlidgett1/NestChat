@@ -1,4 +1,5 @@
-import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from './ai/models.ts';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT, isGeminiModel } from './ai/models.ts';
+import { geminiSimpleText } from './ai/gemini.ts';
 import {
   type MemoryItem,
   type MemoryType,
@@ -17,8 +18,6 @@ import { memoryContextHeader, contentHash } from './chunker.ts';
 import { embedChunks, type ChunkToEmbed } from './embedder.ts';
 import { softDeleteSource, insertEmbeddedChunks } from './ingestion-helpers.ts';
 import { getAdminClient } from './supabase.ts';
-
-const client = getOpenAIClient();
 
 // ============================================================================
 // Types
@@ -121,16 +120,30 @@ Reply with ONLY the category slug, nothing else.`;
 
 export async function classifyCategory(fact: string): Promise<string> {
   try {
-    const response = await client.responses.create({
-      model: MODEL_MAP.orchestration,
-      instructions: CLASSIFY_CATEGORY_PROMPT,
-      input: fact,
-      max_output_tokens: 256,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.orchestration },
-    } as Parameters<typeof client.responses.create>[0]);
+    const model = MODEL_MAP.orchestration;
+    let text: string | undefined;
 
-    const text = response.output_text;
+    if (isGeminiModel(model)) {
+      const result = await geminiSimpleText({
+        model,
+        systemPrompt: CLASSIFY_CATEGORY_PROMPT,
+        userMessage: fact,
+        maxOutputTokens: 256,
+      });
+      text = result.text;
+    } else {
+      const client = getOpenAIClient();
+      const response = await client.responses.create({
+        model,
+        instructions: CLASSIFY_CATEGORY_PROMPT,
+        input: fact,
+        max_output_tokens: 256,
+        store: false,
+        reasoning: { effort: REASONING_EFFORT.orchestration },
+      } as Parameters<typeof client.responses.create>[0]);
+      text = response.output_text;
+    }
+
     if (!text) return CATEGORY_TAXONOMY.fallback;
 
     return normaliseCategory(text);
@@ -229,16 +242,30 @@ export async function extractCandidateMemories(
   const messageIds = messages.map((m) => m.id);
 
   try {
-    const response = await client.responses.create({
-      model: MODEL_MAP.orchestration,
-      instructions: EXTRACTION_PROMPT,
-      input: conversationText,
-      max_output_tokens: 1024,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.orchestration },
-    } as Parameters<typeof client.responses.create>[0]);
+    const model = MODEL_MAP.orchestration;
+    let text: string | undefined;
 
-    const text = response.output_text;
+    if (isGeminiModel(model)) {
+      const result = await geminiSimpleText({
+        model,
+        systemPrompt: EXTRACTION_PROMPT,
+        userMessage: conversationText,
+        maxOutputTokens: 1024,
+      });
+      text = result.text;
+    } else {
+      const client = getOpenAIClient();
+      const response = await client.responses.create({
+        model,
+        instructions: EXTRACTION_PROMPT,
+        input: conversationText,
+        max_output_tokens: 1024,
+        store: false,
+        reasoning: { effort: REASONING_EFFORT.orchestration },
+      } as Parameters<typeof client.responses.create>[0]);
+      text = response.output_text;
+    }
+
     if (!text) return [];
 
     let rawText = text.trim();
@@ -421,16 +448,30 @@ Reply with EXACTLY one of:
 - REJECT — this is a duplicate, trivial, or should not be stored`;
 
   try {
-    const response = await client.responses.create({
-      model: MODEL_MAP.orchestration,
-      instructions: 'You are a memory adjudication system. Respond with exactly one action line.',
-      input: prompt,
-      max_output_tokens: 256,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.orchestration },
-    } as Parameters<typeof client.responses.create>[0]);
+    const model = MODEL_MAP.orchestration;
+    let text: string | undefined;
 
-    const text = response.output_text;
+    if (isGeminiModel(model)) {
+      const result = await geminiSimpleText({
+        model,
+        systemPrompt: 'You are a memory adjudication system. Respond with exactly one action line.',
+        userMessage: prompt,
+        maxOutputTokens: 256,
+      });
+      text = result.text;
+    } else {
+      const client = getOpenAIClient();
+      const response = await client.responses.create({
+        model,
+        instructions: 'You are a memory adjudication system. Respond with exactly one action line.',
+        input: prompt,
+        max_output_tokens: 256,
+        store: false,
+        reasoning: { effort: REASONING_EFFORT.orchestration },
+      } as Parameters<typeof client.responses.create>[0]);
+      text = response.output_text;
+    }
+
     if (!text) {
       return isSingular && sameCategoryExisting.length > 0
         ? { type: 'SUPERSEDE_EXISTING', existingId: sameCategoryExisting[0].id }

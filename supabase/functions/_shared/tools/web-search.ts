@@ -2,6 +2,23 @@ import type { ToolContract } from './types.ts';
 import { geminiGroundedSearch, isGeminiModel } from '../ai/gemini.ts';
 import { MODEL_MAP } from '../ai/models.ts';
 
+function buildDateTimeContext(timezone: string | null): string {
+  const now = new Date();
+  const tz = timezone ?? 'UTC';
+  const formatted = now.toLocaleString('en-AU', {
+    timeZone: tz,
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+  const shortTz = now.toLocaleString('en-AU', { timeZone: tz, timeZoneName: 'short' }).split(' ').pop() ?? tz;
+  return `${formatted} ${shortTz}`;
+}
+
 export const webSearchTool: ToolContract = {
   name: 'web_search',
   description:
@@ -20,8 +37,9 @@ export const webSearchTool: ToolContract = {
     },
     required: ['query'],
   },
-  handler: async (input) => {
+  handler: async (input, ctx) => {
     const query = (input.query as string) ?? '';
+    const userTz = ctx?.timezone ?? null;
 
     // For Gemini models, perform a real grounded search via a dedicated API call
     if (isGeminiModel(MODEL_MAP.fast)) {
@@ -29,11 +47,13 @@ export const webSearchTool: ToolContract = {
         return { content: 'No search query provided.' };
       }
       try {
+        const dateTimeContext = buildDateTimeContext(userTz);
+        const timedQuery = `[Current date and time: ${dateTimeContext}] ${query}`;
         const result = await geminiGroundedSearch({
           model: MODEL_MAP.fast,
-          query,
+          query: timedQuery,
         });
-        console.log(`[web_search] Gemini grounded search: "${query}" → ${result.text.length} chars`);
+        console.log(`[web_search] Gemini grounded search: "${query}" → ${result.text.length} chars (tz=${userTz ?? 'UTC'})`);
         return { content: result.text };
       } catch (err) {
         console.error(`[web_search] Gemini grounded search failed:`, (err as Error).message);

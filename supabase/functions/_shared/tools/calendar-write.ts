@@ -89,11 +89,13 @@ export const calendarWriteTool: ToolContract = {
       } = await import('../calendar-helpers.ts');
 
       const token = await resolveCalendarToken(ctx.authUserId, input.account as string | undefined);
-      let tz = 'UTC';
-      if (token.provider === 'google') {
-        try { tz = await fetchCalendarTimezone(token.accessToken); } catch { /* UTC fallback */ }
-      } else if (token.provider === 'microsoft') {
-        try { tz = await fetchOutlookTimezone(token.accessToken); } catch { /* UTC fallback */ }
+      let tz = ctx.timezone || 'Australia/Melbourne';
+      if (tz === 'UTC' || !ctx.timezone) {
+        if (token.provider === 'google') {
+          try { const fetched = await fetchCalendarTimezone(token.accessToken); if (fetched && fetched !== 'UTC') tz = fetched; } catch { /* fallback */ }
+        } else if (token.provider === 'microsoft') {
+          try { const fetched = await fetchOutlookTimezone(token.accessToken); if (fetched && fetched !== 'UTC') tz = fetched; } catch { /* fallback */ }
+        }
       }
 
       if (action === 'create') {

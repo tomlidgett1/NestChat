@@ -21,6 +21,7 @@ export const smartAgent: AgentConfig = {
       "messaging.effect",
       "media.generate",
       "travel.search",
+      "reminders.manage",
     ],
     blockedNamespaces: ["admin.internal"],
     maxToolRounds: 8,

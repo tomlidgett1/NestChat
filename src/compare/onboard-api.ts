@@ -270,16 +270,14 @@ function buildOnboardingPrompt(session: OnboardSession): string {
   if (isFirstMessage) {
     sections.push(`First Message Guidance
 This is the user's very first message to Nest.
-Your opener must be unusually engaging. It should feel interesting straight away, not generic or polite-by-default.
+Your opener must be unusually engaging. It should feel interesting straight away, not generic or polite-by-default. Be cheeky.
 Lead with a sharp, slightly cheeky line that creates curiosity or momentum, then respond directly to what they said.
 Do NOT open with "hey", "hi", "how can I help?", "what can I do for you?", or anything that sounds like support.
-Keep it under 30 words per bubble.
+Keep it under 40 words per bubble.
 Do not pitch features.
 
-EXTRACTION: Your opener MUST end with one intriguing question that pulls something real out of them. Not "how can I help" but something specific and curious like:
-- "tell me something interesting about you"
 
-Default behaviour: use "tell me something interesting about you" as your first question.
+Default behaviour: You need to try and get the user to tell you something interesting about them, not generic things, something that is unique to them.
 If they reply with something bland, generic, or low-effort, push back playfully and ask again for something genuinely interesting.
 Keep the pushback cheeky, confident, and brief, never mean.
 Your objective is intrigue and momentum so they want to keep texting you.
@@ -305,8 +303,7 @@ The goal: keep them wanting to continue the thread while showing fast, specific 
   } else if (shouldForceVerification && !session.verificationSent) {
     verificationBlock = `This turn is user message #${userTurnNumber}. You MUST include a verification prompt now.
 
-Use this exact vibe in its own bubble:
-"Quick one - i just need to confirm you're a human"
+Mention that you need to verify they're human (can be cheeky).
 
 Then put the verification link in its own separate bubble on its own line:
 
@@ -451,6 +448,30 @@ export async function handleOnboardNew(_req: Request, res: Response) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Supabase backend call — routes through the production pipeline
+// ═══════════════════════════════════════════════════════════════
+
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+async function callSupabaseOnboard(message: string, keepHistory: boolean): Promise<Record<string, unknown>> {
+  const url = `${SUPABASE_URL}/functions/v1/debug-dashboard?api=run-single`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    },
+    body: JSON.stringify({ message, expectedAgent: 'onboard', keepHistory, forceOnboarding: true }),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text();
+    throw new Error(`Supabase onboard call failed (${resp.status}): ${errBody}`);
+  }
+  return await resp.json() as Record<string, unknown>;
+}
+
 export async function handleOnboardChat(req: Request, res: Response) {
   const { sessionId, message, provider: reqProvider, model: reqModel, columnId } = req.body as {
     sessionId?: string;
@@ -469,28 +490,22 @@ export async function handleOnboardChat(req: Request, res: Response) {
     return res.status(404).json({ error: 'Session not found. Create a new session first.' });
   }
 
-  const provider = (reqProvider || 'gemini') as Provider;
-  const model = reqModel || 'gemini-3.1-flash-lite-preview';
+  const provider = (reqProvider || 'production') as string;
   const colId = columnId || 'default';
   const colState = getColumnState(session, colId);
 
   const start = Date.now();
 
   try {
-    const systemPrompt = buildOnboardingPrompt(session);
-    const result = await callLLM(provider, model, systemPrompt, colState.messages, message);
+    // Route through the production Supabase pipeline
+    const keepHistory = session.turnCount > 0; // keep history after first message
+    const result = await callSupabaseOnboard(message, keepHistory);
 
-    let responseText = result.text;
-    const tokens = result.tokens;
+    let responseText = (result.responseText as string) ?? '';
+    const tokens = ((result.inputTokens as number) ?? 0) + ((result.outputTokens as number) ?? 0);
+    const model = (result.model as string) ?? 'production';
 
     const userTurnNumber = session.turnCount + 1;
-
-    responseText = enforceVerificationBubble(
-      responseText,
-      session.onboardUrl,
-      userTurnNumber,
-      session.verificationSent,
-    ) ?? responseText;
 
     if (responseText.includes(session.onboardUrl) || responseText.includes('nest.expert')) {
       session.verificationSent = true;
@@ -510,26 +525,14 @@ export async function handleOnboardChat(req: Request, res: Response) {
       else if (userTurnNumber >= 3) session.onboardState = 'first_value_delivered';
     }
 
-    // Persist to Supabase (only for first column to avoid duplicates)
-    if (colId === 'default' || colId === Array.from(session.columnStates.keys())[0]) {
-      const supabase = getSupabase();
-      await supabase
-        .from('user_profiles')
-        .update({ onboard_count: session.turnCount })
-        .eq('handle', session.handle)
-        .then(({ error }) => {
-          if (error) console.warn('[onboard-test] Failed to update onboard state:', error.message);
-        });
-    }
-
     const latencyMs = Date.now() - start;
-    console.log(`[onboard-test] Turn ${userTurnNumber} [${provider}/${model}] col:${colId}: ${latencyMs}ms, ${tokens ?? '?'} tokens`);
+    console.log(`[onboard-test] Turn ${userTurnNumber} [production/${model}] col:${colId}: ${latencyMs}ms, ${tokens ?? '?'} tokens`);
 
     return res.json({
       text: responseText,
       latencyMs,
       tokens,
-      provider,
+      provider: 'production',
       model,
       columnId: colId,
       turnNumber: userTurnNumber,
@@ -538,11 +541,14 @@ export async function handleOnboardChat(req: Request, res: Response) {
       experimentVariants: session.experimentVariants,
       handle: session.handle,
       onboardUrl: session.onboardUrl,
+      // Include trace from production for debugging
+      trace: result.trace ?? null,
+      toolCalls: result.tools ?? [],
     });
   } catch (err) {
     const latencyMs = Date.now() - start;
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[onboard-test] Error [${provider}/${model}] col:${colId} (${latencyMs}ms):`, errMsg);
+    console.error(`[onboard-test] Error [production] col:${colId} (${latencyMs}ms):`, errMsg);
     return res.status(500).json({ error: errMsg, columnId: colId });
   }
 }
@@ -901,18 +907,14 @@ export async function handleOnboardAgentChat(req: Request, res: Response) {
   const start = Date.now();
 
   try {
-    const systemPrompt = buildOnboardingPrompt(session);
-    const result = await runOnboardAgentLoop(systemPrompt, colState.messages, message, session);
+    // Route through the production Supabase pipeline (same as handleOnboardChat)
+    const keepHistory = session.turnCount > 0;
+    const result = await callSupabaseOnboard(message, keepHistory);
 
-    let responseText = result.text;
+    const responseText = (result.responseText as string) ?? '';
+    const tokens = ((result.inputTokens as number) ?? 0) + ((result.outputTokens as number) ?? 0);
+    const model = (result.model as string) ?? 'production';
     const userTurnNumber = session.turnCount + 1;
-
-    responseText = enforceVerificationBubble(
-      responseText,
-      session.onboardUrl,
-      userTurnNumber,
-      session.verificationSent,
-    ) ?? responseText;
 
     colState.messages.push(
       { role: 'user', content: message },
@@ -931,36 +933,26 @@ export async function handleOnboardAgentChat(req: Request, res: Response) {
       session.verificationSent = true;
     }
 
-    if (colId === 'default' || colId === Array.from(session.columnStates.keys())[0]) {
-      const supabase = getSupabase();
-      await supabase
-        .from('user_profiles')
-        .update({ onboard_count: session.turnCount })
-        .eq('handle', session.handle)
-        .then(({ error }) => {
-          if (error) console.warn('[onboard-agent] Failed to update onboard state:', error.message);
-        });
-    }
-
     const latencyMs = Date.now() - start;
-    console.log(`[onboard-agent] Turn ${userTurnNumber} [${result.model}] col:${colId}: ${latencyMs}ms, ${result.tokens} tokens, ${result.rounds} rounds, ${result.toolCalls.length} tool calls`);
+    console.log(`[onboard-agent] Turn ${userTurnNumber} [production/${model}] col:${colId}: ${latencyMs}ms, ${tokens} tokens`);
 
     return res.json({
       text: responseText,
       latencyMs,
-      tokens: result.tokens,
+      tokens,
       provider: 'production',
-      model: result.model,
-      agent: 'onboard',
-      routeAgent: 'onboard',
-      toolCalls: result.toolCalls.map(tc => ({ name: tc.name, args: tc.args })),
-      agentLoopRounds: result.rounds,
+      model,
+      agent: result.agent ?? 'onboard',
+      routeAgent: result.agent ?? 'onboard',
+      toolCalls: (result.tools as string[] ?? []).map((name: string) => ({ name })),
+      agentLoopRounds: result.rounds ?? 0,
       columnId: colId,
       turnNumber: userTurnNumber,
       onboardState: session.onboardState,
       verificationSent: session.verificationSent,
       handle: session.handle,
       onboardUrl: session.onboardUrl,
+      trace: result.trace ?? null,
     });
   } catch (err) {
     const latencyMs = Date.now() - start;

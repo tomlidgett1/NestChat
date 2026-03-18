@@ -14,6 +14,7 @@ import { contactsReadTool } from './contacts-read.ts';
 import { granolaReadTool } from './granola-read.ts';
 import { travelTimeTool } from './travel-time.ts';
 import { placesSearchTool } from './places-search.ts';
+import { manageReminderTool } from './manage-reminder.ts';
 
 const REGISTRY = new Map<string, ToolContract>();
 
@@ -42,6 +43,7 @@ register(contactsReadTool);
 register(granolaReadTool);
 register(travelTimeTool);
 register(placesSearchTool);
+register(manageReminderTool);
 
 export function getTool(name: string): ToolContract | undefined {
   return REGISTRY.get(name);

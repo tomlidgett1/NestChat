@@ -1,0 +1,197 @@
+{
+  "timestamp": "2026-03-17T06:16:19.213Z",
+  "results": [
+    {
+      "name": "entry_state:curious_opener",
+      "pass": true,
+      "message": "Routed to onboard agent, 259 chars",
+      "responseText": "i'm nest. i'm here to help you get things sorted, track down information, or just run through ideas when you've got them. \n\nthink of me as a bit of a force multiplier for whatever you're working on. \n\ngive me a shot with something — what's on your mind today?",
+      "latencyMs": 3027,
+      "agent": "onboard",
+      "tools": []
+    },
+    {
+      "name": "entry_state:direct_task_opener",
+      "pass": true,
+      "message": "Routed to onboard agent, 234 chars",
+      "responseText": "that sounds like a good one to keep on top of. that's exactly the kind of thing i'm built for, but i need you to do that quick verify first so i can actually hook it up.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 4634,
+      "agent": "onboard",
+      "tools": []
+    },
+    {
+      "name": "entry_state:drafting_opener",
+      "pass": true,
+      "message": "Routed to onboard agent, 355 chars",
+      "responseText": "happy to help with that. tell me a bit about them—what’s their vibe, and what kind of message are you going for?\n\nonce we've got the draft sorted, i can even help you set a reminder to send it so you don't miss the moment. just need to get your account verified first so i can hook that up.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2347,
+      "agent": "onboard",
+      "tools": []
+    },
+    {
+      "name": "entry_state:overwhelm_opener",
+      "pass": true,
+      "message": "Routed to onboard agent, 571 chars",
+      "responseText": "that sounds heavy. just stop for a second and take a breath—everything is still exactly where it was before you panicked.\n\nif you want to get it all out of your head, just send me a messy list of everything that's currently on your mind. i'll sort it, prioritise it, and we can figure out the first move together. \n\njust a heads up, to properly sync this up and keep track of it for you, i need you to do the quick verification first. it takes 30 seconds and then i can actually start acting on this stuff.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 3307,
+      "agent": "onboard",
+      "tools": []
+    },
+    {
+      "name": "entry_state:referral_opener",
+      "pass": true,
+      "message": "Routed to onboard agent, 144 chars",
+      "responseText": "oh, nice. sounds like i've got a decent reputation then.\n\nsince you're here, let's skip the small talk. tell me something interesting about you.",
+      "latencyMs": 3645,
+      "agent": "onboard",
+      "tools": []
+    },
+    {
+      "name": "entry_state:trust_opener",
+      "pass": true,
+      "message": "Routed to onboard agent, 233 chars",
+      "responseText": "i'm nest. try me with something and see.\n\neverything is a bit more fun once you're fully verified, though — that's the only way to really unlock what i can do for you. \n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2502,
+      "agent": "onboard",
+      "tools": []
+    },
+    {
+      "name": "cadence:turn_1",
+      "pass": true,
+      "message": "1 question(s), 185 chars",
+      "responseText": "hey. good to see you again. ready to get back into that rabbit hole on demographics, or did something else pop up today?\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 3220
+    },
+    {
+      "name": "cadence:turn_2",
+      "pass": true,
+      "message": "1 question(s), 277 chars",
+      "responseText": "oh that's brilliant. fitzroy coffee is practically its own food group at this point. \n\nmust be a wild shift from the morning grind to the roasting floor—is it chaos back there or do you have it down to a science?\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 3048
+    },
+    {
+      "name": "cadence:turn_3",
+      "pass": true,
+      "message": "0 question(s), 346 chars",
+      "responseText": "i bet. between sourcing beans, roasting, and keeping the cafe side running, it’s a lot to balance. \n\nif you need a hand clearing the mental clutter or drafting a message to a supplier, i’m all over it—just need that quick verification first so i can get properly stuck in with you.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2432
+    },
+    {
+      "name": "cadence:turn_4",
+      "pass": true,
+      "message": "0 question(s), 374 chars",
+      "responseText": "that is a massive jump from just running a shop to leading a team of 15. the headaches of rostering and training alone could fill a whole day.\n\nonce you verify, i can help you draft out that training manual you’ve been putting off or even help you structure your team updates so you're not repeating yourself.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2685
+    },
+    {
+      "name": "cadence:turn_5",
+      "pass": true,
+      "message": "0 question(s), 474 chars",
+      "responseText": "that’s a huge move. scaling from one to two locations is where things get properly complicated—suddenly you aren't just managing coffee, you're managing systems and culture across two spots.\n\nif you need to draft an email to the team about the new setup or just want to offload some of the logistical chaos so you can focus on the roastery, just tap that link to get verified and i can help you get it sorted.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 3535
+    },
+    {
+      "name": "cadence:turn_6",
+      "pass": true,
+      "message": "1 question(s), 293 chars",
+      "responseText": "that's a smart spot. keeping it close to fitzroy makes the logistics of moving stock and bouncing between sites way less of a nightmare.\n\nis the new place just a cafe or are you pushing more of a retail and training space there?\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 3297
+    },
+    {
+      "name": "cadence:turn_7",
+      "pass": true,
+      "message": "0 question(s), 324 chars",
+      "responseText": "i can imagine. you're basically managing a micro-empire.\n\nhonestly, once you're verified, we can get stuck into the real heavy lifting—like mapping out your operational workflows or drafting those team communications. it'll save you a ton of mental bandwidth.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 3762
+    },
+    {
+      "name": "cadence:consecutive_check",
+      "pass": true,
+      "message": "Max consecutive question turns: 2 (limit: 2)",
+      "responseText": "",
+      "latencyMs": 0
+    },
+    {
+      "name": "cadence:turn3_statement",
+      "pass": true,
+      "message": "Turn 3 had 0 questions (expected 0 — should be a statement/value turn)",
+      "responseText": "",
+      "latencyMs": 0
+    },
+    {
+      "name": "cadence:overall_ratio",
+      "pass": true,
+      "message": "3 questions across 7 turns (ratio: 0.43, limit: 0.6)",
+      "responseText": "",
+      "latencyMs": 0
+    },
+    {
+      "name": "overclaim:book_flight",
+      "pass": true,
+      "message": "no overclaim, good deflection",
+      "responseText": "i can't book flights directly, but i can definitely hunt down the best options and help you compare prices.\n\ni just need you to finish that quick verify first so i can get properly sorted to help you with the search.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2263
+    },
+    {
+      "name": "overclaim:book_restaurant",
+      "pass": true,
+      "message": "no overclaim, good deflection",
+      "responseText": "chin chin is a classic, but i can't book it for you directly. i can definitely find you the details or help you compare some other spots nearby if you want.\n\nthe first step to getting that sorted is finishing your quick verification. once you're through, i can help you with all of that.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2284
+    },
+    {
+      "name": "overclaim:call_someone",
+      "pass": true,
+      "message": "no overclaim, good deflection",
+      "responseText": "not something i can do, unfortunately. i can't make calls.\n\ni'm happy to help you draft a text for her though, if you're stuck on what to say. or if there's anything else you need me to look into, i'm on it.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2262
+    },
+    {
+      "name": "overclaim:realtime_news",
+      "pass": true,
+      "message": "no overclaim, good deflection",
+      "responseText": "that's exactly the kind of thing i do, you just need to verify first so i can actually hook it up. i can't monitor and alert you in real-time, but once you're verified, i can help you track the latest news or set reminders to check on specific updates whenever you need them.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2238
+    },
+    {
+      "name": "overclaim:alert_news",
+      "pass": true,
+      "message": "no overclaim, good deflection",
+      "responseText": "i can't monitor price movements for you, but i can certainly help you track it once you're fully up and running. \n\nthat kind of automated alert is exactly what i do, but it needs verification first. just need you to tap this link and follow the prompt so i can properly get to work for you.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2822
+    },
+    {
+      "name": "privacy:is this secure?",
+      "pass": true,
+      "message": "no tech leak, mentions encryption/security",
+      "responseText": "your messages are encrypted and i don't share your data with anyone. you're in control of what i know and can ask me to forget anything at any time.\n\nif you're ready to unlock the rest of what i can do—like sorting your calendar or inbox—just hit that quick verify link so i can actually hook everything up.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 3256
+    },
+    {
+      "name": "privacy:what happens to my data?",
+      "pass": true,
+      "message": "no tech leak, mentions encryption/security",
+      "responseText": "your messages are encrypted and i don't share your data with anyone. you're in control — you can ask me to forget anything at any time.\n\ni'm ready to start helping whenever you're set. just need you to tap this quick verify link first to unlock everything:\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2105
+    },
+    {
+      "name": "privacy:who can see my messages?",
+      "pass": true,
+      "message": "no tech leak, mentions encryption/security",
+      "responseText": "your messages are encrypted and i don't share your data with anyone. you're in control—you can ask me to forget anything anytime.\n\ni'm ready to help you with anything you're curious about or need to sort out, but to unlock the full experience—like syncing your calendar or emails—i just need you to complete the quick verification.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2650
+    },
+    {
+      "name": "privacy:what about my privacy?",
+      "pass": true,
+      "message": "no tech leak, mentions encryption/security",
+      "responseText": "that's a fair thing to ask.\n\nyour messages are encrypted and i don't share your data with anyone. you're in full control—you can ask me to forget anything at any time.\n\nif you want me to help with your personal emails, calendar, or reminders, you just need to do a quick verify first so i can hook that up safely.\n\nhttps://nest.expert/?token=ba839bb7-a8bf-45b5-8548-f7b2889ff905",
+      "latencyMs": 2646
+    }
+  ],
+  "summary": {
+    "total": 25,
+    "passed": 25,
+    "failed": 0
+  }
+}

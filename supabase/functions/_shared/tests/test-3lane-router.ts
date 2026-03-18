@@ -55,7 +55,7 @@ function makeContext(overrides?: {
 interface TestCase {
   name: string;
   message: string;
-  expectedLane: '0B-casual' | '0B-knowledge' | '0C';
+  expectedLane: '0A' | '0B-casual' | '0B-knowledge' | '0C';
   context?: Parameters<typeof makeContext>[0];
 }
 
@@ -150,6 +150,28 @@ const tests: TestCase[] = [
   { name: 'L3: free after lunch', message: 'free after lunch', expectedLane: '0C' },
   { name: 'L3: whats in my inbox', message: "what's in my inbox", expectedLane: '0C' },
 
+  // ── Lane 3: Classifier (disqualifier: personal recall) ────────
+  { name: 'L3: how many goals did I kick', message: 'How many goals did I kick in my last game', expectedLane: '0C' },
+  { name: 'L3: what did I eat yesterday', message: 'what did I eat yesterday', expectedLane: '0C' },
+  { name: 'L3: when did I last see Dave', message: 'when did I last see Dave', expectedLane: '0C' },
+  { name: 'L3: where did we go for dinner', message: 'where did we go for dinner', expectedLane: '0C' },
+  { name: 'L3: who did I meet with', message: 'who did I meet with last week', expectedLane: '0C' },
+  { name: 'L3: did I ever tell you about', message: 'did I ever tell you about my trip', expectedLane: '0C' },
+  { name: 'L3: do you remember', message: 'do you remember what I said about that', expectedLane: '0C' },
+  { name: 'L3: try again + recall', message: 'Try again: How many goals did I kick in my last game', expectedLane: '0C' },
+  { name: 'L3: how many km did we run', message: 'how many km did we run on Saturday', expectedLane: '0C' },
+  { name: 'L3: what did I say about', message: 'what did I say about the project', expectedLane: '0C' },
+
+  // ── Lane 3: Classifier (pending email + non-confirmation escapes Layer 0A) ──
+  {
+    name: 'L3: personal recall with pending email escapes 0A',
+    message: 'How many goals did I kick in my last game',
+    expectedLane: '0C',
+    context: {
+      pendingEmailSends: [{ id: 135, to: ['tom@example.com'], subject: "What's up", status: 'awaiting_confirmation' }],
+    },
+  },
+
   // ── Lane 3: Classifier (pending state) ───────────────────────
   {
     name: 'L3: yes (awaitingConfirmation)',
@@ -160,7 +182,7 @@ const tests: TestCase[] = [
   {
     name: 'L0A: yeah (pending calendar action → Layer 0A)',
     message: 'yeah',
-    expectedLane: '0A' as any,
+    expectedLane: '0A',
     context: {
       workingMemory: {
         pendingActions: [{ type: 'calendar_create', description: 'Create event', createdTurnId: 'x' }],
@@ -259,11 +281,13 @@ for (const tc of tests) {
       console.log(`  ❌ ${tc.name} → ${detail}`);
     }
   } catch (err) {
-    // If the error is about missing OpenAI credentials, it means the
-    // deterministic router returned null and the classifier was called.
-    // That's correct for Lane 3 tests.
+    // If the error is about missing credentials, it means the deterministic
+    // router returned null and the classifier (or classifyConfirmation for
+    // Layer 0A escape tests) was called. That's correct for Lane 3 tests
+    // and for pending-email escape tests that should fall through to 0C.
     const errMsg = (err as Error).message ?? '';
-    if (tc.expectedLane === '0C' && (errMsg.includes('apiKey') || errMsg.includes('OPENAI_API_KEY') || errMsg.includes('credentials'))) {
+    const isCredentialError = errMsg.includes('apiKey') || errMsg.includes('OPENAI_API_KEY') || errMsg.includes('credentials') || errMsg.includes('API_KEY');
+    if (tc.expectedLane === '0C' && isCredentialError) {
       passed++;
       console.log(`  ✅ ${tc.name} → 0C (classifier called, no API key — correct)`);
     } else {

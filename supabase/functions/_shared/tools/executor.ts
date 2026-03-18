@@ -50,7 +50,7 @@ interface SingleToolResult {
   blocked?: ToolCallBlockedTrace;
 }
 
-const COMMIT_EXEMPT_TOOLS = new Set(['send_reaction', 'send_effect', 'remember_user']);
+const COMMIT_EXEMPT_TOOLS = new Set(['send_reaction', 'send_effect', 'remember_user', 'manage_reminder']);
 
 const COMMIT_INTENT_TOOLS = new Set(['calendar_write', 'email_send']);
 

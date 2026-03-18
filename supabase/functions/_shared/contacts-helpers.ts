@@ -1,5 +1,6 @@
 // Google People API + Microsoft Graph contacts helpers for Nest V3.
 // Uses token-broker.ts for all token management.
+// Falls back to Gmail header search when People API returns no results.
 
 import {
   getGoogleAccessToken,
@@ -10,6 +11,7 @@ import {
 import { getAdminClient } from './supabase.ts';
 
 const PEOPLE_API = 'https://people.googleapis.com/v1';
+const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const GRAPH_API = 'https://graph.microsoft.com/v1.0/me';
 
 const READ_MASK = 'names,emailAddresses,phoneNumbers,organizations,biographies,urls';
@@ -236,6 +238,106 @@ function countFields(c: NormalisedContact): number {
 }
 
 // ══════════════════════════════════════════════════════════════
+// GMAIL HEADER FALLBACK — find contacts from email history
+// ══════════════════════════════════════════════════════════════
+
+const EMAIL_HEADER_RE = /(?:"?([^"<]*)"?\s*)?<?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>?/;
+
+function parseEmailHeader(header: string): { name: string | null; email: string } | null {
+  const match = header.match(EMAIL_HEADER_RE);
+  if (!match) return null;
+  const name = (match[1] ?? '').trim() || null;
+  const email = match[2]?.toLowerCase();
+  if (!email) return null;
+  return { name, email };
+}
+
+function splitHeaderAddresses(header: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let inAngle = false;
+  for (const ch of header) {
+    if (ch === '"') inQuotes = !inQuotes;
+    if (ch === '<') inAngle = true;
+    if (ch === '>') inAngle = false;
+    if (ch === ',' && !inQuotes && !inAngle) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) parts.push(current);
+  return parts;
+}
+
+async function searchGmailHeaders(
+  accessToken: string,
+  query: string,
+  account: string,
+  maxResults: number,
+): Promise<NormalisedContact[]> {
+  const gmailQuery = `from:${query} OR to:${query}`;
+  const params = new URLSearchParams({ q: gmailQuery, maxResults: String(Math.min(maxResults * 3, 30)) });
+
+  const listResp = await fetch(`${GMAIL_API}/messages?${params}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!listResp.ok) return [];
+  const listData = await listResp.json();
+  const messageIds: string[] = (listData.messages ?? []).map((m: any) => m.id);
+
+  if (messageIds.length === 0) return [];
+
+  const contactMap = new Map<string, NormalisedContact>();
+  const queryLower = query.toLowerCase();
+
+  const fetches = messageIds.slice(0, 15).map(async (id) => {
+    const resp = await fetch(`${GMAIL_API}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!resp.ok) return;
+    const msg = await resp.json();
+    const headers: { name: string; value: string }[] = msg.payload?.headers ?? [];
+
+    for (const h of headers) {
+      if (h.name !== 'From' && h.name !== 'To') continue;
+      const parts = splitHeaderAddresses(h.value);
+      for (const part of parts) {
+        const parsed = parseEmailHeader(part.trim());
+        if (!parsed) continue;
+        const nameMatch = parsed.name && parsed.name.toLowerCase().includes(queryLower);
+        const emailMatch = parsed.email.includes(queryLower);
+        if (!nameMatch && !emailMatch) continue;
+        if (parsed.email === account.toLowerCase()) continue;
+
+        if (!contactMap.has(parsed.email)) {
+          contactMap.set(parsed.email, {
+            name: parsed.name,
+            emails: [parsed.email],
+            phones: [],
+            organisation: null,
+            title: null,
+            biography: null,
+            urls: [],
+            resourceName: null,
+            provider: 'google',
+            account,
+          });
+        } else if (parsed.name && !contactMap.get(parsed.email)!.name) {
+          contactMap.get(parsed.email)!.name = parsed.name;
+        }
+      }
+    }
+  });
+
+  await Promise.allSettled(fetches);
+  return [...contactMap.values()].slice(0, maxResults);
+}
+
+// ══════════════════════════════════════════════════════════════
 // PUBLIC API — SEARCH CONTACTS
 // ══════════════════════════════════════════════════════════════
 
@@ -313,7 +415,30 @@ export async function searchContactsTool(
     }
   }
 
-  return deduplicateContacts(allContacts).slice(0, maxResults);
+  const deduplicated = deduplicateContacts(allContacts);
+
+  if (deduplicated.length === 0) {
+    const gmailFallbackResults: NormalisedContact[] = [];
+    const gmailTokens = account
+      ? [await getGoogleAccessToken(userId, { email: account }).catch(() => null)]
+      : await getAllGoogleTokens(userId).catch(() => [] as TokenResult[]);
+
+    const gmailResults = await Promise.allSettled(
+      (gmailTokens.filter(Boolean) as TokenResult[]).map((token) =>
+        searchGmailHeaders(token.accessToken, query, token.email, maxResults),
+      ),
+    );
+
+    for (const result of gmailResults) {
+      if (result.status === 'fulfilled') gmailFallbackResults.push(...result.value);
+    }
+
+    if (gmailFallbackResults.length > 0) {
+      return deduplicateContacts(gmailFallbackResults).slice(0, maxResults);
+    }
+  }
+
+  return deduplicated.slice(0, maxResults);
 }
 
 // ══════════════════════════════════════════════════════════════

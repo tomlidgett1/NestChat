@@ -1,4 +1,5 @@
-import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from "../ai/models.ts";
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT, isGeminiModel } from "../ai/models.ts";
+import { geminiSimpleText } from "../ai/gemini.ts";
 import type {
   Capability,
   ClassifierResult,
@@ -64,6 +65,7 @@ Fine-grained tool requirements. Only include what's actually needed:
 - "memory.read": reading stored memories about the user
 - "memory.write": saving new information about the user
 - "travel.search": finding places (restaurants, cafes, bars, businesses, attractions), getting travel times, directions, transit schedules, walking/cycling/driving times. Use for ANY question about locations, places to eat/drink, "how long to get to X", "best coffee near X", "phone number for X", "is X open", directions, commute times, etc.
+- "reminders.manage": creating, listing, editing, or deleting reminders. Use when the user says "remind me", "set a reminder", "nudge me", "what reminders do I have", "cancel that reminder", or anything about scheduling personal reminders/nudges.
 - "deep_profile": ONLY for comprehensive self-knowledge requests like "what do you know about me?", "tell me about myself", "tell me something interesting about me", "give me a summary of everything you know about me", "surprise me with what you know". This triggers an exhaustive multi-source search. Do NOT use for simple recall like "what's my name?" or "where do I work?" — those are just memory.read.
 
 ## memoryDepth
@@ -81,6 +83,8 @@ Set to true ONLY when the task is execution-blocked without external retrieval:
 - "How long to drive to the airport?" -> true (needs travel.search for live travel time)
 - "Any restaurants open near me?" -> true (needs travel.search for live place data)
 - "Next train from Flinders St to Caulfield?" -> true (needs travel.search for live transit)
+- "Remind me to call Sarah tomorrow at 3pm" -> true (needs manage_reminder)
+- "What reminders do I have?" -> true (needs manage_reminder)
 - "How should I think about calendar hygiene?" -> false (can answer from knowledge)
 - "Tell me about the history of Japan" -> false (general knowledge, web search is optional enrichment)
 
@@ -125,6 +129,19 @@ function buildClassifierInput(
       `Pending email draft: id=${draft.id}, to=${
         draft.to.join(", ")
       }, subject="${draft.subject ?? "none"}", status=awaiting_confirmation`,
+    );
+  }
+
+  const TOOL_TAG_RE =
+    /\[(email_read|email_draft|email_send|calendar_read|calendar_write|contacts_read|travel_time|places_search|semantic_search|granola_read|web_search)\]/;
+  const toolsInRecentTurns = context.recentTurns
+    .filter((t) => t.role === "assistant")
+    .slice(-3)
+    .some((t) => TOOL_TAG_RE.test(t.content));
+
+  if (toolsInRecentTurns) {
+    contextParts.push(
+      `IMPORTANT: The assistant used tools in recent turns. The user is likely continuing an active workflow. Strongly prefer "smart" mode unless the message is purely social/emotional with zero task intent.`,
     );
   }
 
@@ -186,23 +203,40 @@ export async function classifyTurn(
   input: TurnInput,
   context: RouterContext,
 ): Promise<ClassifierResult> {
-  const client = getOpenAIClient();
+  const model = MODEL_MAP.orchestration;
   const start = Date.now();
 
   try {
-    const response = await client.responses.create(
-      {
-        model: MODEL_MAP.orchestration,
-        instructions: CLASSIFIER_INSTRUCTIONS,
-        input: buildClassifierInput(input, context),
-        max_output_tokens: 1024,
-        store: false,
-        reasoning: { effort: REASONING_EFFORT.orchestration },
-      } as Parameters<typeof client.responses.create>[0],
-    );
+    let text: string;
+
+    if (isGeminiModel(model)) {
+      // Gemini path: flatten multi-turn input into a single user message
+      const inputMessages = buildClassifierInput(input, context);
+      const flatInput = inputMessages.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
+      const geminiResult = await geminiSimpleText({
+        model,
+        systemPrompt: CLASSIFIER_INSTRUCTIONS,
+        userMessage: flatInput,
+        maxOutputTokens: 1024,
+      });
+      text = geminiResult.text;
+    } else {
+      // OpenAI path
+      const client = getOpenAIClient();
+      const response = await client.responses.create(
+        {
+          model,
+          instructions: CLASSIFIER_INSTRUCTIONS,
+          input: buildClassifierInput(input, context),
+          max_output_tokens: 1024,
+          store: false,
+          reasoning: { effort: REASONING_EFFORT.orchestration },
+        } as Parameters<typeof client.responses.create>[0],
+      );
+      text = response.output_text ?? "";
+    }
 
     const ms = Date.now() - start;
-    const text = response.output_text ?? "";
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
@@ -282,6 +316,7 @@ const VALID_CAPABILITIES: Set<string> = new Set([
   "memory.read",
   "memory.write",
   "travel.search",
+  "reminders.manage",
   "deep_profile",
 ]);
 

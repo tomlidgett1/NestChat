@@ -1,0 +1,152 @@
+{
+  "timestamp": "2026-03-17T06:20:28.443Z",
+  "results": [
+    {
+      "name": "travel:driving_normal",
+      "pass": true,
+      "message": "141 chars, used travel_time, matches expected pattern",
+      "responseText": "**drive time now:** ~35 mins (22 km) \n**typical with light traffic:** ~29 mins \n**traffic buffer:** if it’s busy, plan ~45–55 mins to be safe",
+      "latencyMs": 9264,
+      "toolsUsed": [
+        "travel_time"
+      ]
+    },
+    {
+      "name": "travel:transit_normal",
+      "pass": true,
+      "message": "518 chars, used travel_time, matches expected pattern",
+      "responseText": "**best next option**\n**leave:** 5:21pm \n**line:** frankston line (towards frankston) \n**from -> to:** flinders street -> caulfield \n**arrive:** 5:36pm \n**stops:** 4 \n**then:** you’re basically at caulfield station (just follow the exit signs)\n\n---\n**backup if you miss it**\n**leave:** 5:27pm \n**line:** frankston line (towards cheltenham) \n**from -> to:** flinders street -> caulfield \n**arrive:** 5:45pm\n\n(if you tell me which platform you’re near at flinders, i can point you to the quickest way onto the right one.)",
+      "latencyMs": 9739,
+      "toolsUsed": [
+        "travel_time"
+      ]
+    },
+    {
+      "name": "travel:walking",
+      "pass": true,
+      "message": "113 chars, used travel_time, matches expected pattern",
+      "responseText": "**walk time:** ~17 mins \n**distance:** ~1.3 km\n\nmost people go via birrarung marr / the footbridges over punt rd.",
+      "latencyMs": 8851,
+      "toolsUsed": [
+        "travel_time"
+      ]
+    },
+    {
+      "name": "travel:cycling",
+      "pass": true,
+      "message": "201 chars, used travel_time, matches expected pattern",
+      "responseText": "yep, totally bikeable.\n\n**bike time now:** ~20 mins \n**distance:** ~6.2 km \n\nquickest vibe is usually down barkly st then onto the elster canal/shared path, and keep heading towards brighton foreshore.",
+      "latencyMs": 12743,
+      "toolsUsed": [
+        "travel_time"
+      ]
+    },
+    {
+      "name": "travel:ambiguous_location",
+      "pass": true,
+      "message": "325 chars, no tool expected, matches expected pattern",
+      "responseText": "that came back with a nonsense result (it couldn’t tell which “coffee shop” or which “train station” you mean and picked something random).\n\nsend me either:\n- the coffee shop name (or address), and\n- the train station name\n\nand how you’re travelling (walking, driving, or public transport), and i’ll give you the proper time.",
+      "latencyMs": 18418,
+      "toolsUsed": [
+        "travel_time"
+      ]
+    },
+    {
+      "name": "travel:long_distance",
+      "pass": true,
+      "message": "191 chars, used travel_time, matches expected pattern",
+      "responseText": "**drive time now:** about 9 hr 30 min (roughly 876 km, usually via the hume) \n**without traffic:** closer to ~9 hr\n\nreal-world, it’s typically a 9 to 10 hour day once you add fuel/food stops.",
+      "latencyMs": 11630,
+      "toolsUsed": [
+        "travel_time"
+      ]
+    },
+    {
+      "name": "travel:international_no_road",
+      "pass": true,
+      "message": "425 chars, no tool expected, matches expected pattern",
+      "responseText": "you can’t drive it straight up, there’s no road route from sydney to auckland (you’d have to cross the tasman sea).\n\n---\nif you mean “door to door”:\n**fly time:** ~3 hours sydney → auckland (plus airport time) \n**typical total:** ~6–8 hours all up depending on check-in/bags/traffic\n\nif you tell me where in sydney you’re starting from (suburb) and where in auckland you’re headed, i can give a tighter door-to-door estimate.",
+      "latencyMs": 9268,
+      "toolsUsed": [
+        "travel_time"
+      ]
+    },
+    {
+      "name": "places:coffee_specific",
+      "pass": true,
+      "message": "1137 chars, used places_search, matches pattern",
+      "responseText": "here are a few solid picks in fitzroy.\n\n---\n**industry beans fitzroy** — 4.4/5 (1,991)\n70-76 westgarth st. (currently closed)\nbig warehouse vibe, proper roastery setup, consistently good espresso + great brunch.\nhttps://industrybeans.com/pages/fitzroy-menu\n\n---\n**faraday’s cage** — 4.5/5 (937)\n325-329 gore st. (currently closed)\nreliable “coffee-first” place, good for a quieter sit and a solid long black.\nhttp://www.faradayscage.com.au/\n\n---\n**stagger lee’s fitzroy** — 4.5/5 (850)\n276 brunswick st. (currently closed)\nsingle origin focus, good toasties, classic brunswick st people-watching.\nhttps://staggerlees.com.au/\n\n---\n**slowpoke espresso** — 4.6/5 (445)\n157 brunswick st. (currently closed)\ncosy courtyard, great if you want a slower breakfast and an easy hang.\nhttp://www.facebook.com/pages/Slowpoke-Espresso/221714874514535\n\n---\n**blackcat fitzroy** — 4.6/5 (1,190)\n252 brunswick st. **open now**\nmore of a bar vibe later, but genuinely good coffee and a nice window seat.\nhttp://www.blackcatfitzroy.com/\n\nif you tell me what you’re after (quick takeaway vs sit-down, espresso vs filter), i’ll narrow it to the best 1 or 2.",
+      "latencyMs": 11844,
+      "toolsUsed": [
+        "places_search"
+      ]
+    },
+    {
+      "name": "places:restaurant_area",
+      "pass": true,
+      "message": "866 chars, used places_search, matches pattern",
+      "responseText": "here are a few solid picks around flinders lane.\n\n---\n**cha ching** — 4.7/5 (2.3k)\n348 flinders ln. open now. \nfun, loud, asian-fusion with big flavours. good for groups. \n\n---\n**nomad melbourne** — 4.5/5 (1.2k)\n187 flinders ln. open now. \nwood-fired, modern aussie/med vibes, great wine list. a good “nice dinner” option.\n\n---\n**supernormal** — 4.5/5 (5.1k) $$$\n180 flinders ln. open now. \nbuzzy bench seating, asian-inspired menu. iconic for a reason (can be a wait).\n\n---\n**farmer’s daughters** — 4.5/5 (1.9k) $$$\n95 exhibition st (2 mins off flinders ln). open now. \nseasonal local produce, plus a rooftop bar if you want a drink after.\n\n---\n**tippy-tay** — 4.3/5 (1.2k) $$\n101 flinders ln. open now. \nitalian-ish, good for a casual date night and a spritz.\n\nif you tell me the vibe (quick bite vs date night vs group) and budget, i’ll narrow it to the best 1-2.",
+      "latencyMs": 11557,
+      "toolsUsed": [
+        "places_search"
+      ]
+    },
+    {
+      "name": "places:bar_recommendation",
+      "pass": true,
+      "message": "899 chars, used places_search, matches pattern",
+      "responseText": "a few solid collingwood picks for tonight:\n\n---\nabove board — 4.8/5\n1/306 smith st (down chopper lane, kinda hidden)\nproper cocktails, small room, great if you want “one really good drink”.\nhttps://maps.google.com/?cid=10610991101209601593&g_mp=Cidnb29nbGUubWFwcy5wbGFjZXMudjEuUGxhY2VzLlNlYXJjaFRleHQQAhgEIAA\n\n---\nparadise alley — 4.6/5\n25 easey st\nlow-lit, fun late-night energy. good “let’s settle in for a bit” bar.\nhttps://maps.google.com/?cid=7195138585991197047&g_mp=Cidnb29nbGUubWFwcy5wbGFjZXMudjEuUGxhY2VzLlNlYXJjaFRleHQQAhgEIAA\n\n---\ngoldy’s! tavern — 4.5/5 (open now)\n66a gold st\neasy pub vibe with solid drinks and food if you need a base.\nhttps://maps.google.com/?cid=4631358150350094128&g_mp=Cidnb29nbGUubWFwcy5wbGFjZXMudjEuUGxhY2VzLlNlYXJjaFRleHQQAhgEIAA\n\nif you tell me the vibe (cocktails vs wine vs rowdy pub) and roughly what time you’re heading out, i’ll narrow it to the best 1-2.",
+      "latencyMs": 16257,
+      "toolsUsed": [
+        "places_search"
+      ]
+    },
+    {
+      "name": "places:generic_query",
+      "pass": true,
+      "message": "920 chars, used places_search, matches pattern",
+      "responseText": "here are a few solid gyms in melbourne cbd.\n---\n**doherty’s gym city** — 4.4/5 (167)\n367 flinders st, melbourne. open now.\nmore old-school weights/bodybuilding vibe.\nhttps://maps.google.com/?cid=14150437485708759092&g_mp=Cidnb29nbGUubWFwcy5wbGFjZXMudjEuUGxhY2VzLlNlYXJjaFRleHQQAhgEIAA\n---\n**virgin active collins street** — 4.2/5 (414)\n1/567 collins st, melbourne. open now.\nbigger “health club” feel (classes, nicer facilities).\nhttps://maps.google.com/?cid=9273645712186664900&g_mp=Cidnb29nbGUubWFwcy5wbGFjZXMudjEuUGxhY2VzLlNlYXJjaFRleHQQAhgEIAA\n---\n**anytime fitness melbourne cbd (bourke st)** — 4.2/5 (142)\ngoldsbrough village, cnr bourke & william (mezzanine). open now.\nhandy if you want 24/7 access.\nhttps://maps.google.com/?cid=13023684258945941121&g_mp=Cidnb29nbGUubWFwcy5wbGFjZXMudjEuUGxhY2VzLlNlYXJjaFRleHQQAhgEIAA\n\nwhere are you roughly (cbd, richmond, south yarra, etc.)? i’ll narrow it to the closest 2-3.",
+      "latencyMs": 14105,
+      "toolsUsed": [
+        "places_search"
+      ]
+    },
+    {
+      "name": "places:specific_place",
+      "pass": true,
+      "message": "475 chars, missing places_search, matches pattern",
+      "responseText": "People generally rave about it. The consensus is usually that the croissants are some of the best you'll find anywhere, though you'll almost always be dealing with a decent queue if you go during peak times.\n\nMost people say the \"classic\" Lune croissant is worth the wait, and the cruffins are a big draw if they haven't sold out. It’s definitely a \"treat yourself\" kind of spot rather than a quick grab-and-go.\n\nAre you thinking of heading to the one in the city or Fitzroy?",
+      "latencyMs": 4341,
+      "toolsUsed": []
+    },
+    {
+      "name": "places:hours_check",
+      "pass": true,
+      "message": "200 chars, used places_search, matches pattern",
+      "responseText": "not right now. queen victoria market is closed at the moment.\n\nnext open depends on the day (some days are night market etc) but if you tell me when you’re thinking of going, i’ll pin the exact hours.",
+      "latencyMs": 9709,
+      "toolsUsed": [
+        "places_search"
+      ]
+    },
+    {
+      "name": "format:how do i get from richmond to the city b",
+      "pass": true,
+      "message": "4 bubbles, longest: 270 chars",
+      "responseText": "easiest tram run is off swan st.\n\n---\n**best tram option (swan st)**\n**walk to:** Church St/Swan St stop\n**line:** Tram 70 (towards Waterfront City Docklands) \n**ride to:** Flinders Street Station (Stop 4) \n**time:** ~18 mins on the tram (about ~25-35 mins door-to-door depending where you start in richmond)\n\n---\n**backup (also swan st)**\n**line:** Tram 75 (towards Melbourne Uni) \n**ride to:** Flinders Street / Swanston St area, then it’s a short walk into the cbd\n\n---\nif you tell me roughly where you are in richmond (swan st end vs victoria st end), i’ll point you at the closest stop + the best line from there.",
+      "latencyMs": 14399
+    },
+    {
+      "name": "format:find me the 3 best rated pizza places in",
+      "pass": true,
+      "message": "4 bubbles, longest: 258 chars, HAS EM DASHES",
+      "responseText": "here are the 3 best-rated pizza spots i’m seeing around melbourne (by rating, with solid review counts).\n\n---\n**golden pizza** — 4.9/5 (2,832 reviews) \n465 lygon st, brunswick east \nopen now \nclassic local favourite with a huge menu (traditional + gourmet).\n\n---\n**11 inch pizza** — 4.7/5 (1,869 reviews) \n7a/353 little collins st, melbourne cbd \nopen now \ngourmet pizzas + calzones, good for a sit-down feed.\n\n---\n**sunnyside sliced (mentone)** — 4.7/5 (1,103 reviews) \n34 como pde w, mentone \nopen now \nbig “slice shop” energy, great if you want quick + casual.\n\nif you tell me your suburb (or cbd vs inner north etc), i’ll narrow it to the best 3 within ~15 mins of you.",
+      "latencyMs": 19854
+    }
+  ],
+  "summary": {
+    "total": 15,
+    "passed": 15,
+    "failed": 0
+  }
+}

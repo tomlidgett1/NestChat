@@ -8,7 +8,7 @@ export const productivityAgent: AgentConfig = {
   modelTier: 'agent',
   maxOutputTokens: 8192,
   toolPolicy: {
-    allowedNamespaces: ['memory.read', 'memory.write', 'email.read', 'email.write', 'calendar.read', 'calendar.write', 'contacts.read', 'granola.read', 'messaging.react', 'messaging.effect', 'web.search', 'travel.search'],
+    allowedNamespaces: ['memory.read', 'memory.write', 'email.read', 'email.write', 'calendar.read', 'calendar.write', 'contacts.read', 'granola.read', 'messaging.react', 'messaging.effect', 'web.search', 'travel.search', 'reminders.manage'],
     blockedNamespaces: ['admin.internal'],
     maxToolRounds: 5,
   },

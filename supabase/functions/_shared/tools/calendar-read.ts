@@ -59,26 +59,28 @@ export const calendarReadTool: ToolContract = {
         isMicrosoftAuthError,
       } = await import('../calendar-helpers.ts');
 
-      let tz = 'UTC';
-      try {
-        const tokens = await getAllCalendarTokens(ctx.authUserId!);
-        for (const token of tokens) {
-          try {
-            const fetched = token.provider === 'google'
-              ? await fetchCalendarTimezone(token.accessToken)
-              : await fetchOutlookTimezone(token.accessToken);
-            if (fetched && fetched !== 'UTC') {
-              tz = fetched;
-              break;
-            }
-          } catch { continue; }
+      let tz = ctx.timezone || 'Australia/Melbourne';
+      if (tz === 'UTC' || !ctx.timezone) {
+        try {
+          const tokens = await getAllCalendarTokens(ctx.authUserId!);
+          for (const token of tokens) {
+            try {
+              const fetched = token.provider === 'google'
+                ? await fetchCalendarTimezone(token.accessToken)
+                : await fetchOutlookTimezone(token.accessToken);
+              if (fetched && fetched !== 'UTC') {
+                tz = fetched;
+                break;
+              }
+            } catch { continue; }
+          }
+          if (tz && tz !== 'UTC') {
+            const { updateUserTimezone } = await import('../state.ts');
+            updateUserTimezone(ctx.senderHandle, tz).catch(() => {});
+          }
+        } catch {
+          // Fall through with default
         }
-        if (tz && tz !== 'UTC') {
-          const { updateUserTimezone } = await import('../state.ts');
-          updateUserTimezone(ctx.senderHandle, tz).catch(() => {});
-        }
-      } catch {
-        // Fall through with UTC
       }
 
       if (action === 'lookup') {

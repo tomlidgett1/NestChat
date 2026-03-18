@@ -1,57 +1,7 @@
-// RAG embedding utilities — extracted from TapMeeting tools.ts.
-// Provides OpenAI text-embedding-3-large embeddings with LRU cache,
-// batch support, and pgvector-compatible string formatting.
+// RAG embedding utilities — uses Gemini gemini-embedding-2-preview (3072 dims).
+// Provides LRU-cached embeddings, batch support, and pgvector-compatible string formatting.
 
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
-const FETCH_TIMEOUT_MS = 10_000;
-
-// ── Fetch with timeout + 1-retry ─────────────────────────────
-
-function fetchWithTimeout(
-  url: string | URL,
-  init?: RequestInit,
-  timeoutMs = FETCH_TIMEOUT_MS,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { ...init, signal: controller.signal }).finally(() =>
-    clearTimeout(timer),
-  );
-}
-
-async function retryFetch(
-  url: string | URL,
-  init?: RequestInit,
-  timeoutMs = FETCH_TIMEOUT_MS,
-): Promise<Response> {
-  const MAX_ATTEMPTS = 2;
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    try {
-      const resp = await fetchWithTimeout(url, init, timeoutMs);
-      if (resp.ok || (resp.status >= 400 && resp.status < 500 && resp.status !== 429)) {
-        return resp;
-      }
-      if (attempt < MAX_ATTEMPTS - 1) {
-        const backoff = (attempt + 1) * 1500;
-        console.warn(`[rag-tools] ${resp.status} on attempt ${attempt + 1}, retrying in ${backoff}ms`);
-        await new Promise((r) => setTimeout(r, backoff));
-        continue;
-      }
-      return resp;
-    } catch (e) {
-      lastError = e as Error;
-      if (attempt < MAX_ATTEMPTS - 1) {
-        const backoff = (attempt + 1) * 1500;
-        console.warn(`[rag-tools] Error on attempt ${attempt + 1}: ${lastError.message}, retrying in ${backoff}ms`);
-        await new Promise((r) => setTimeout(r, backoff));
-      }
-    }
-  }
-
-  throw lastError ?? new Error("retryFetch: max attempts exceeded");
-}
+import { batchEmbedTexts } from "./gemini-embedder.ts";
 
 // ── Embedding LRU Cache ──────────────────────────────────────
 
@@ -79,33 +29,13 @@ export async function getEmbedding(text: string): Promise<number[]> {
 }
 
 /**
- * Embed multiple texts in a single OpenAI API call.
+ * Embed multiple texts using Gemini batchEmbedContents.
  * Returns embeddings in the same order as the input texts.
  */
 export async function getBatchEmbeddings(
   texts: string[],
 ): Promise<number[][]> {
-  if (texts.length === 0) return [];
-
-  const resp = await retryFetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: "text-embedding-3-large", input: texts }),
-  });
-
-  if (!resp.ok) {
-    const detail = await resp.text();
-    throw new Error(`Embedding API failed (${resp.status}): ${detail.slice(0, 300)}`);
-  }
-
-  const data = await resp.json();
-
-  return (data.data as Array<{ index: number; embedding: number[] }>)
-    .sort((a, b) => a.index - b.index)
-    .map((d) => d.embedding);
+  return batchEmbedTexts(texts);
 }
 
 /**

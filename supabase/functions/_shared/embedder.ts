@@ -78,7 +78,7 @@ export async function embedChunks(
 
 /**
  * Truncate text that exceeds the token limit for embeddings.
- * text-embedding-3-large handles ~8191 tokens; we estimate 4 chars/token.
+ * gemini-embedding-2-preview handles ~8192 tokens; we estimate 4 chars/token.
  */
 export function truncateForEmbedding(text: string, maxChars = 30000): string {
   return text.length > maxChars ? text.slice(0, maxChars) : text;

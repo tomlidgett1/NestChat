@@ -5,8 +5,13 @@ import {
   emitOnboardingEvent,
   recordProactiveMessage,
   getActiveMemoryItems,
-  type MemoryItem,
+  getConversationSummaries,
+  getConnectedAccounts,
 } from './state.ts';
+import { USER_PROFILES_TABLE } from './env.ts';
+import { getAdminClient } from './supabase.ts';
+import { liveCalendarLookup } from './calendar-helpers.ts';
+import { gmailSearchTool } from './gmail-helpers.ts';
 
 const client = getOpenAIClient();
 
@@ -18,8 +23,6 @@ export type ProactiveAction =
   | { type: 'hold'; reason: string }
   | { type: 'wait' }
   | { type: 'recovery_nudge'; message: string }
-  | { type: 'checkin_permission'; message: string }
-  | { type: 'morning_checkin'; message: string }
   | { type: 'memory_moment'; message: string }
   | { type: 'mark_at_risk' }
   | { type: 'mark_activated' };
@@ -61,26 +64,6 @@ export async function evaluateProactiveAction(user: ProactiveEligibleUser): Prom
   ) {
     const message = await generateRecoveryNudge(user);
     return { type: 'recovery_nudge', message };
-  }
-
-  // Check-in permission: eligible if value delivered + second engagement + no prior ask
-  if (
-    user.firstValueDeliveredAt &&
-    user.secondEngagementAt &&
-    user.checkinOptIn === null &&
-    !user.checkinDeclineAt &&
-    user.onboardCount >= 3
-  ) {
-    return {
-      type: 'checkin_permission',
-      message: generateCheckinPermissionAsk(user),
-    };
-  }
-
-  // Morning check-in: if opted in and it's been 20+ hours since last proactive
-  if (user.checkinOptIn === true && hoursSinceLastProactive >= 20) {
-    const message = await generateMorningCheckin(user);
-    return { type: 'morning_checkin', message };
   }
 
   // Memory moment: if value delivered + second engagement + high-confidence memories exist
@@ -136,113 +119,176 @@ Bad examples:
   }
 }
 
-function generateCheckinPermissionAsk(user: ProactiveEligibleUser): string {
-  const name = user.name ? `${user.name}, w` : 'W';
-  return `By the way ${name.toLowerCase()}ould you like a quick morning check-in from me? Just a simple "what's on today?" Totally fine if you'd rather just text me when you need me`;
+// ============================================================================
+// Memory moment — deep, one-off proactive message
+//
+// This fires exactly once per user. It gathers the richest possible context:
+//   1. All active memories about the user
+//   2. Full conversation summary history (what they've talked about)
+//   3. If accounts are connected: upcoming calendar events + recent emails
+//   4. If no accounts: relies solely on conversation + memory context
+//
+// A reasoning model then synthesises all of this to produce a single,
+// genuinely useful message — something that reduces cognitive load,
+// shows follow-through, or surfaces a timely connection the user
+// wouldn't have thought to ask about.
+// ============================================================================
+
+async function resolveAuthUserId(handle: string): Promise<string | null> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase
+    .from(USER_PROFILES_TABLE)
+    .select('auth_user_id')
+    .eq('handle', handle)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return (data.auth_user_id as string) ?? null;
 }
 
-async function generateMorningCheckin(user: ProactiveEligibleUser): Promise<string> {
-  const name = user.name ? ` ${user.name}` : '';
+interface MemoryMomentContext {
+  memories: string;
+  conversationHistory: string;
+  calendarEvents: string | null;
+  recentEmails: string | null;
+  hasConnectedAccounts: boolean;
+}
 
-  try {
-    const memories = await getActiveMemoryItems(user.handle, 5);
-    const memoryContext = memories.length > 0
-      ? `\nYou know these things about them:\n${memories.map((m) => `- ${m.valueText}`).join('\n')}`
-      : '';
+async function gatherMemoryMomentContext(user: ProactiveEligibleUser): Promise<MemoryMomentContext | null> {
+  const chatId = `DM#${user.botNumber}#${user.handle}`;
 
-    const response = await client.responses.create({
-      model: MODEL_MAP.agent,
-      instructions: `You are Nest, a personal assistant. Generate a brief morning check-in message. Keep it to 1 short sentence. Be warm but not over-the-top. Australian spelling. Never mention AI or bots.
+  const [memories, summaries] = await Promise.all([
+    getActiveMemoryItems(user.handle, 30),
+    getConversationSummaries(chatId, 20),
+  ]);
 
-The user's name is${name || ' unknown'}.${memoryContext}
+  if (memories.length === 0 && summaries.length === 0) return null;
 
-Good: "Morning${name}. Anything on today that you want me to keep track of?"
-Bad: "Good morning! How are you doing today? I hope you're having a great day!" (too much)`,
-      input: 'Generate the morning check-in.',
-      max_output_tokens: 2048,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.agent },
-    } as Parameters<typeof client.responses.create>[0]);
+  const memoriesText = memories.length > 0
+    ? memories.map((m) =>
+        `- [${m.memoryType}/${m.category}] ${m.valueText} (confidence: ${Math.round(m.confidence * 100)}%, last seen: ${m.lastSeenAt})`
+      ).join('\n')
+    : 'No stored memories yet.';
 
-    const text = response.output_text;
-    return text ? text.trim() : `Morning${name}. Anything on today you want me to keep track of?`;
-  } catch {
-    return `Morning${name}. Anything on today you want me to keep track of?`;
+  const conversationText = summaries.length > 0
+    ? summaries.map((s) => {
+        const topics = s.topics.length > 0 ? ` | Topics: ${s.topics.join(', ')}` : '';
+        const loops = s.openLoops.length > 0 ? ` | Open loops: ${s.openLoops.join(', ')}` : '';
+        return `- [${s.firstMessageAt} → ${s.lastMessageAt}] ${s.summary}${topics}${loops}`;
+      }).join('\n')
+    : 'No conversation summaries available.';
+
+  let calendarEvents: string | null = null;
+  let recentEmails: string | null = null;
+  let hasConnectedAccounts = false;
+
+  const authUserId = await resolveAuthUserId(user.handle);
+
+  if (authUserId) {
+    const accounts = await getConnectedAccounts(authUserId);
+    hasConnectedAccounts = accounts.length > 0;
+
+    if (hasConnectedAccounts) {
+      const tz = user.timezone || 'Australia/Sydney';
+
+      const [calResult, emailResult] = await Promise.allSettled([
+        liveCalendarLookup(authUserId, 'next 3 days', tz, undefined, undefined, 15),
+        gmailSearchTool(authUserId, { query: 'newer_than:3d', max_results: 10, time_zone: tz }),
+      ]);
+
+      if (calResult.status === 'fulfilled' && calResult.value.events.length > 0) {
+        calendarEvents = calResult.value.events.map((e) => {
+          const time = e.all_day ? 'all day' : e.start;
+          const attendees = e.attendees.length > 0 ? ` (with: ${e.attendees.join(', ')})` : '';
+          const location = e.location ? ` @ ${e.location}` : '';
+          return `- ${e.title} — ${time}${location}${attendees}`;
+        }).join('\n');
+      }
+
+      if (emailResult.status === 'fulfilled') {
+        const emailData = emailResult.value as { results?: Array<{ from: string; subject: string; date: string; snippet: string }> };
+        if (emailData.results && emailData.results.length > 0) {
+          recentEmails = emailData.results.map((e) =>
+            `- From: ${e.from} | Subject: ${e.subject} | ${e.date}\n  ${e.snippet}`
+          ).join('\n');
+        }
+      }
+    }
   }
-}
 
-// ============================================================================
-// Memory moment evaluation
-// ============================================================================
+  return { memories: memoriesText, conversationHistory: conversationText, calendarEvents, recentEmails, hasConnectedAccounts };
+}
 
 async function evaluateMemoryMoment(user: ProactiveEligibleUser): Promise<string | null> {
-  const memories = await getActiveMemoryItems(user.handle, 10);
-  if (memories.length === 0) return null;
+  const ctx = await gatherMemoryMomentContext(user);
+  if (!ctx) return null;
 
-  const highConfidence = memories.filter((m) => m.confidence >= 0.7);
-  if (highConfidence.length === 0) return null;
-
-  const scored = highConfidence.map((m) => ({
-    memory: m,
-    score: scoreMemoryForMoment(m, user),
-  }));
-
-  const best = scored.sort((a, b) => b.score - a.score)[0];
-  if (!best || best.score < 0.5) return null;
-
-  return await generateMemoryMomentMessage(user, best.memory);
-}
-
-function scoreMemoryForMoment(memory: MemoryItem, user: ProactiveEligibleUser): number {
-  let score = 0;
-
-  // Confidence
-  score += memory.confidence * 0.3;
-
-  // Utility: task-related memories are more useful
-  if (['task_commitment', 'plan'].includes(memory.memoryType)) score += 0.3;
-  if (['preference', 'bio_fact'].includes(memory.memoryType)) score += 0.1;
-
-  // Timeliness: recent memories are better
-  const ageHours = (Date.now() - new Date(memory.lastSeenAt).getTime()) / 3600000;
-  if (ageHours < 24) score += 0.2;
-  else if (ageHours < 48) score += 0.1;
-
-  // Sensitivity: personal/emotional categories get penalised
-  if (['relationship', 'emotional_context', 'health'].includes(memory.memoryType)) score -= 0.3;
-
-  // Creep risk: very personal details too early
-  const userAgeHours = (Date.now() / 1000 - user.firstSeen) / 3600;
-  if (userAgeHours < 24 && ['relationship', 'health'].includes(memory.memoryType)) score -= 0.5;
-
-  return Math.max(0, Math.min(1, score));
-}
-
-async function generateMemoryMomentMessage(user: ProactiveEligibleUser, memory: MemoryItem): Promise<string> {
   const name = user.name ? ` ${user.name}` : '';
+  const now = new Date().toLocaleString('en-AU', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: user.timezone || 'Australia/Sydney',
+  });
+
+  let contextBlock = `## What you know about${name || ' this person'}\n${ctx.memories}\n\n## Conversation history\n${ctx.conversationHistory}`;
+
+  if (ctx.calendarEvents) {
+    contextBlock += `\n\n## Their upcoming calendar (next 3 days)\n${ctx.calendarEvents}`;
+  }
+  if (ctx.recentEmails) {
+    contextBlock += `\n\n## Their recent emails (last 3 days)\n${ctx.recentEmails}`;
+  }
 
   try {
     const response = await client.responses.create({
       model: MODEL_MAP.agent,
-      instructions: `You are Nest, a personal assistant. Generate a brief, helpful follow-up message that references something you remember about the user. Keep it to 1-2 short sentences. Be warm and useful, not creepy. Australian spelling. Never mention AI or bots.
+      instructions: `You are an intelligence layer for Nest, a personal assistant that people text. Your job is to analyse everything known about a user and produce ONE proactive message that is genuinely, specifically useful to them right now.
 
-The user's name is${name || ' unknown'}.
-The memory to reference: "${memory.valueText}" (category: ${memory.category})
+Current time: ${now}
 
-The goal is to make the user feel supported, not surveilled. Reference the memory in a way that reduces their cognitive load or shows follow-through.
+${contextBlock}
 
-Good: "Morning${name}. Hope the prescription pickup went smoothly yesterday. Do you still want to send that email to the school today?"
-Bad: "I remember you mentioned your mum's birthday is coming up!" (just showing off memory)`,
-      input: 'Generate the memory moment message.',
+## Your task
+
+Analyse all of the above deeply. Look for:
+1. **Open loops** — things they said they'd do but haven't followed up on
+2. **Upcoming commitments** — calendar events they might need to prepare for, or conflicts they haven't noticed
+3. **Timely connections** — an email that relates to something they mentioned in conversation, a meeting that connects to a task they committed to
+4. **Forgotten follow-ups** — things they asked Nest to help with that have a natural next step
+5. **Cognitive load reduction** — anything where a short nudge saves them from having to remember
+
+${ctx.hasConnectedAccounts ? 'You have access to their calendar and emails. Cross-reference these with their conversation history and memories to find genuinely useful connections they might not see themselves.' : 'No calendar or email accounts are connected. Work purely from conversation history and memories. Focus on open loops, commitments, and follow-ups from what they have told you.'}
+
+## Rules
+
+- Output ONLY the message text. Nothing else.
+- Keep it to 1-2 short sentences. This is a text message, not an email.
+- Be specific. Reference actual things — names, dates, tasks, events. Never be vague.
+- The tone is a sharp, thoughtful friend who noticed something useful — not a notification system.
+- Australian spelling.
+- Never mention AI, bots, technology, or that you "analysed" anything. You just remembered / noticed.
+- Never show off memory for its own sake. Every reference must serve the user.
+- If you genuinely cannot find anything useful and specific to say, respond with exactly: SKIP
+- Do NOT be generic. "Hope your week's going well" = instant fail. "Hey, you mentioned wanting to call the dentist before Thursday — still want me to remind you?" = good.
+
+## Anti-patterns (never do these)
+- "I remember you mentioned..." (showing off)
+- "Just checking in!" (generic)
+- "How did X go?" without a useful follow-up attached (empty curiosity)
+- Referencing sensitive topics (health, relationships) unless there's a clear practical action
+- Surfacing calendar/email info without connecting it to something they actually care about`,
+      input: 'Analyse the full context and generate the memory moment message, or SKIP if nothing is genuinely useful.',
       max_output_tokens: 2048,
       store: false,
-      reasoning: { effort: REASONING_EFFORT.agent },
+      reasoning: { effort: 'high' as const },
     } as Parameters<typeof client.responses.create>[0]);
 
-    const text = response.output_text;
-    return text ? text.trim() : null as unknown as string;
-  } catch {
-    return null as unknown as string;
+    const text = response.output_text?.trim();
+    if (!text || text === 'SKIP' || text.length < 10) return null;
+    return text;
+  } catch (err) {
+    console.error('[proactive] Memory moment generation failed:', (err as Error).message);
+    return null;
   }
 }
 
@@ -300,24 +346,6 @@ export async function executeProactiveAction(
       await emitOnboardingEvent({
         handle: user.handle,
         eventType: 'recovery_nudge_sent',
-        currentState: user.onboardState,
-      });
-      return { sent: true, message: action.message };
-
-    case 'checkin_permission':
-      await recordProactiveMessage(user.handle, `DM#${user.botNumber}#${user.handle}`, 'checkin_permission', action.message);
-      await emitOnboardingEvent({
-        handle: user.handle,
-        eventType: 'checkin_permission_offered',
-        currentState: user.onboardState,
-      });
-      return { sent: true, message: action.message };
-
-    case 'morning_checkin':
-      await recordProactiveMessage(user.handle, `DM#${user.botNumber}#${user.handle}`, 'morning_checkin', action.message);
-      await emitOnboardingEvent({
-        handle: user.handle,
-        eventType: 'morning_checkin_sent',
         currentState: user.onboardState,
       });
       return { sent: true, message: action.message };

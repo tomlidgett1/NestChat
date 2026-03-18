@@ -11,14 +11,14 @@ export interface MessageHandler {
 }
 
 export function createWebhookHandler(onMessage: MessageHandler) {
-  const botNumbers = (process.env.SENDBLUE_BOT_NUMBERS || '')
+  const botNumbers = (process.env.LINQ_AGENT_BOT_NUMBERS || '')
     .split(',')
     .map(p => p.trim())
     .filter(Boolean);
   const ignoredSenders = process.env.IGNORED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
   const allowedSenders = process.env.ALLOWED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
-  const webhookSecret = process.env.SENDBLUE_WEBHOOK_SECRET;
-  const webhookSecretHeader = (process.env.SENDBLUE_WEBHOOK_SECRET_HEADER || 'x-sendblue-secret').toLowerCase();
+  const webhookSecret = process.env.LINQ_WEBHOOK_SECRET;
+  const webhookSecretHeader = (process.env.LINQ_WEBHOOK_SECRET_HEADER || 'x-webhook-secret').toLowerCase();
   const processedMessages = new Map<string, number>();
 
   function pruneProcessedMessages() {
@@ -34,7 +34,7 @@ export function createWebhookHandler(onMessage: MessageHandler) {
     if (webhookSecret) {
       const providedSecret = req.header(webhookSecretHeader);
       if (providedSecret !== webhookSecret) {
-        console.warn('[webhook] Invalid Sendblue webhook secret');
+        console.warn('[webhook] Invalid webhook secret');
         res.status(401).json({ error: 'invalid webhook secret' });
         return;
       }
@@ -42,12 +42,12 @@ export function createWebhookHandler(onMessage: MessageHandler) {
 
     const event = req.body as SendblueWebhookEvent;
     const messageId = event.message_handle || 'unknown';
-    console.log(`[webhook] Incoming Sendblue payload ${messageId}`);
+    console.log(`[webhook] Incoming payload ${messageId}`);
 
     res.status(200).json({ received: true });
 
     if (!isInboundReceiveWebhook(event)) {
-      console.log('[webhook] Ignoring non-inbound Sendblue event');
+      console.log('[webhook] Ignoring non-inbound event');
       return;
     }
 

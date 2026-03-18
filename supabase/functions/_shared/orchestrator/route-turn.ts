@@ -3,7 +3,8 @@
  * New routing lives in route-turn-v2.ts (Option A: 2-agent classifier-based architecture).
  * Do not add new features here. Will be removed after production confidence is established.
  */
-import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT, classifyConfirmation } from '../ai/models.ts';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT, classifyConfirmation, isGeminiModel } from '../ai/models.ts';
+import { geminiSimpleText } from '../ai/gemini.ts';
 import type { TurnInput, RouteDecision, AgentName, ToolNamespace, UserStyle } from './types.ts';
 import type { RouterContext } from './build-context.ts';
 
@@ -456,19 +457,34 @@ interface RouterResponse {
 
 async function llmRoute(input: TurnInput, context: RouterContext): Promise<RouteDecision> {
   const start = Date.now();
-  const client = getOpenAIClient();
+  const model = MODEL_MAP.orchestration;
 
   try {
-    const response = await client.responses.create({
-      model: MODEL_MAP.orchestration,
-      instructions: ROUTER_INSTRUCTIONS,
-      input: buildRouterInput(input, context),
-      max_output_tokens: 1024,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.orchestration },
-    } as Parameters<typeof client.responses.create>[0]);
+    let text: string;
 
-    const text = response.output_text;
+    if (isGeminiModel(model)) {
+      const routerInput = buildRouterInput(input, context);
+      const userMessage = routerInput.map(m => `[${m.role}]: ${m.content}`).join('\n');
+      const result = await geminiSimpleText({
+        model,
+        systemPrompt: ROUTER_INSTRUCTIONS,
+        userMessage,
+        maxOutputTokens: 1024,
+      });
+      text = result.text;
+    } else {
+      const client = getOpenAIClient();
+      const response = await client.responses.create({
+        model,
+        instructions: ROUTER_INSTRUCTIONS,
+        input: buildRouterInput(input, context),
+        max_output_tokens: 1024,
+        store: false,
+        reasoning: { effort: REASONING_EFFORT.orchestration },
+      } as Parameters<typeof client.responses.create>[0]);
+      text = response.output_text;
+    }
+
     const parsed: RouterResponse = JSON.parse(text);
     const agent = parsed.agent as AgentName;
     const latency = Date.now() - start;

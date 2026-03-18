@@ -135,6 +135,83 @@ async function buildMessageContent(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Group context builder — privacy firewall: only chat history,
+// NO memory, profile, accounts, RAG, summaries, or tool traces
+// ═══════════════════════════════════════════════════════════════
+
+export async function buildGroupContext(
+  input: TurnInput,
+): Promise<ContextBuildResult> {
+  const { getConversation, addMessage } = await import("../state.ts");
+
+  const historyP = timed(() => getConversation(input.chatId, 30));
+  const messageContentP = timed(() => buildMessageContent(input));
+
+  const [historyT, messageContentT] = await Promise.all([
+    historyP,
+    messageContentP,
+  ]);
+
+  const history = historyT.result;
+  const { messageContent, transcriptions, transcriptionFailed, textToSend } =
+    messageContentT.result;
+
+  if (textToSend) {
+    addMessage(input.chatId, "user", textToSend, input.senderHandle, {
+      isGroupChat: true,
+      chatName: input.chatName,
+      participantNames: input.participantNames,
+      service: input.service,
+    }).catch((err) =>
+      console.warn("[build-context] group addMessage failed:", (err as Error).message)
+    );
+  }
+
+  const formattedHistory = formatHistory(history, true);
+  const recentTurns = history.slice(-6).map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+
+  const subTimings: ContextSubTimings = {
+    historyMs: historyT.ms,
+    memoryMs: 0,
+    summariesMs: 0,
+    toolTracesMs: 0,
+    profileMs: 0,
+    accountsMs: 0,
+    messageContentMs: messageContentT.ms,
+    ragMs: 0,
+    workingMemoryMs: 0,
+    formatHistoryMs: 0,
+  };
+
+  console.log(
+    `[build-context] GROUP path: history=${historyT.ms}ms msgContent=${messageContentT.ms}ms (no memory/profile/rag/accounts)`,
+  );
+
+  return {
+    history,
+    formattedHistory,
+    messageContent,
+    recentTurns,
+    memoryItems: [],
+    summaries: [],
+    toolTraces: [],
+    ragEvidence: "",
+    ragEvidenceBlockCount: 0,
+    senderProfile: null,
+    connectedAccounts: [],
+    transcriptions,
+    transcriptionFailed,
+    workingMemory: emptyWorkingMemory(),
+    pendingEmailSend: null,
+    pendingEmailSends: [],
+    subTimings,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Router context — lightweight fetch for routing decisions only
 // ═══════════════════════════════════════════════════════════════
 
@@ -143,21 +220,57 @@ export interface RouterContext {
   workingMemory: import("./types.ts").WorkingMemory;
   pendingEmailSend: import("../state.ts").PendingEmailSendAction | null;
   pendingEmailSends: import("../state.ts").PendingEmailSendAction[];
+  preloadedHistory?: StoredMessage[];
+  preloadedProfile?: import("../state.ts").UserProfile | null;
+  preloadedAccounts?: import("../state.ts").ConnectedAccount[];
 }
 
 export async function buildRouterContext(
   input: TurnInput,
 ): Promise<RouterContext> {
-  const { getConversation, getLatestPendingEmailSend, getPendingEmailSends } =
-    await import("../state.ts");
+  const {
+    getConversation,
+    getLatestPendingEmailSend,
+    getPendingEmailSends,
+    getUserProfile,
+    getConnectedAccounts,
+  } = await import("../state.ts");
 
-  const [history, workingMemory, pendingEmailSend, pendingEmailSends] =
-    await Promise.all([
-      getConversation(input.chatId, 6),
-      loadWorkingMemory(input.chatId).then((wm) => wm ?? emptyWorkingMemory()),
-      getLatestPendingEmailSend(input.chatId),
-      getPendingEmailSends(input.chatId),
-    ]);
+  const historyP = getConversation(input.chatId);
+  const workingMemoryP = input.isGroupChat
+    ? Promise.resolve(emptyWorkingMemory())
+    : loadWorkingMemory(input.chatId).then((wm) => wm ?? emptyWorkingMemory());
+  const pendingEmailSendP = input.isGroupChat
+    ? Promise.resolve(null)
+    : getLatestPendingEmailSend(input.chatId);
+  const pendingEmailSendsP = input.isGroupChat
+    ? Promise.resolve([] as import("../state.ts").PendingEmailSendAction[])
+    : getPendingEmailSends(input.chatId);
+
+  const profileP = !input.isGroupChat && input.senderHandle
+    ? getUserProfile(input.senderHandle)
+    : Promise.resolve(null);
+  const accountsP = !input.isGroupChat && input.authUserId
+    ? getConnectedAccounts(input.authUserId)
+    : Promise.resolve(
+      [] as import("../state.ts").ConnectedAccount[],
+    );
+
+  const [
+    history,
+    workingMemory,
+    pendingEmailSend,
+    pendingEmailSends,
+    profile,
+    accounts,
+  ] = await Promise.all([
+    historyP,
+    workingMemoryP,
+    pendingEmailSendP,
+    pendingEmailSendsP,
+    profileP,
+    accountsP,
+  ]);
 
   const recentTurns = history.slice(-6).map((m) => {
     let content = m.content;
@@ -172,7 +285,15 @@ export async function buildRouterContext(
     return { role: m.role, content };
   });
 
-  return { recentTurns, workingMemory, pendingEmailSend, pendingEmailSends };
+  return {
+    recentTurns,
+    workingMemory,
+    pendingEmailSend,
+    pendingEmailSends,
+    preloadedHistory: history,
+    preloadedProfile: profile,
+    preloadedAccounts: accounts,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -193,6 +314,10 @@ export async function buildLightContext(
   input: TurnInput,
   routerCtx?: RouterContext,
 ): Promise<ContextBuildResult> {
+  const hasPreloadedHistory = routerCtx?.preloadedHistory !== undefined;
+  const hasPreloadedProfile = routerCtx?.preloadedProfile !== undefined;
+  const hasPreloadedAccounts = routerCtx?.preloadedAccounts !== undefined;
+
   const {
     getConversation,
     getUserProfile,
@@ -201,11 +326,17 @@ export async function buildLightContext(
     getPendingEmailSends,
   } = await import("../state.ts");
 
-  const historyP = timed(() => getConversation(input.chatId));
-  const profileP = input.senderHandle
+  const historyP = hasPreloadedHistory
+    ? Promise.resolve({ result: routerCtx!.preloadedHistory!, ms: 0 })
+    : timed(() => getConversation(input.chatId));
+  const profileP = hasPreloadedProfile
+    ? Promise.resolve({ result: routerCtx!.preloadedProfile!, ms: 0 })
+    : input.senderHandle
     ? timed(() => getUserProfile(input.senderHandle))
     : Promise.resolve({ result: null, ms: 0 });
-  const accountsP = input.authUserId
+  const accountsP = hasPreloadedAccounts
+    ? Promise.resolve({ result: routerCtx!.preloadedAccounts!, ms: 0 })
+    : input.authUserId
     ? timed(() => getConnectedAccounts(input.authUserId!))
     : Promise.resolve({
       result: [] as import("../state.ts").ConnectedAccount[],
@@ -271,8 +402,13 @@ export async function buildLightContext(
     formatHistoryMs: 0,
   };
 
+  const preloaded = [
+    hasPreloadedHistory && "history",
+    hasPreloadedProfile && "profile",
+    hasPreloadedAccounts && "accounts",
+  ].filter(Boolean);
   console.log(
-    `[build-context] LIGHT path: history=${historyT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms`,
+    `[build-context] LIGHT path: history=${historyT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms${preloaded.length ? ` (preloaded: ${preloaded.join(", ")})` : ""}`,
   );
 
   return {
@@ -307,6 +443,10 @@ export async function buildMemoryLightContext(
   input: TurnInput,
   routerCtx?: RouterContext,
 ): Promise<ContextBuildResult> {
+  const hasPreloadedHistory = routerCtx?.preloadedHistory !== undefined;
+  const hasPreloadedProfile = routerCtx?.preloadedProfile !== undefined;
+  const hasPreloadedAccounts = routerCtx?.preloadedAccounts !== undefined;
+
   const {
     getConversation,
     getConversationSummaries,
@@ -316,7 +456,9 @@ export async function buildMemoryLightContext(
     getPendingEmailSends,
   } = await import("../state.ts");
 
-  const historyP = timed(() => getConversation(input.chatId));
+  const historyP = hasPreloadedHistory
+    ? Promise.resolve({ result: routerCtx!.preloadedHistory!, ms: 0 })
+    : timed(() => getConversation(input.chatId));
 
   let memoryP: Promise<{ result: MemoryItem[]; ms: number }>;
   if (MEMORY_V2_ENABLED && input.senderHandle) {
@@ -332,10 +474,14 @@ export async function buildMemoryLightContext(
     ? timed(() => getConversationSummaries(input.chatId, 6))
     : Promise.resolve({ result: [] as ConversationSummary[], ms: 0 });
 
-  const profileP = input.senderHandle
+  const profileP = hasPreloadedProfile
+    ? Promise.resolve({ result: routerCtx!.preloadedProfile!, ms: 0 })
+    : input.senderHandle
     ? timed(() => getUserProfile(input.senderHandle))
     : Promise.resolve({ result: null, ms: 0 });
-  const accountsP = input.authUserId
+  const accountsP = hasPreloadedAccounts
+    ? Promise.resolve({ result: routerCtx!.preloadedAccounts!, ms: 0 })
+    : input.authUserId
     ? timed(() => getConnectedAccounts(input.authUserId!))
     : Promise.resolve({
       result: [] as import("../state.ts").ConnectedAccount[],
@@ -419,8 +565,13 @@ export async function buildMemoryLightContext(
     formatHistoryMs,
   };
 
+  const preloaded = [
+    hasPreloadedHistory && "history",
+    hasPreloadedProfile && "profile",
+    hasPreloadedAccounts && "accounts",
+  ].filter(Boolean);
   console.log(
-    `[build-context] MEMORY-LIGHT path: history=${historyT.ms}ms memory=${memoryT.ms}ms summaries=${summariesT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms`,
+    `[build-context] MEMORY-LIGHT path: history=${historyT.ms}ms memory=${memoryT.ms}ms summaries=${summariesT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms${preloaded.length ? ` (preloaded: ${preloaded.join(", ")})` : ""}`,
   );
 
   return {
@@ -454,6 +605,10 @@ export async function buildContext(
   input: TurnInput,
   routerCtx?: RouterContext,
 ): Promise<ContextBuildResult> {
+  const hasPreloadedHistory = routerCtx?.preloadedHistory !== undefined;
+  const hasPreloadedProfile = routerCtx?.preloadedProfile !== undefined;
+  const hasPreloadedAccounts = routerCtx?.preloadedAccounts !== undefined;
+
   const {
     getConversation,
     getConversationSummaries,
@@ -464,7 +619,9 @@ export async function buildContext(
     getPendingEmailSends,
   } = await import("../state.ts");
 
-  const historyP = timed(() => getConversation(input.chatId));
+  const historyP = hasPreloadedHistory
+    ? Promise.resolve({ result: routerCtx!.preloadedHistory!, ms: 0 })
+    : timed(() => getConversation(input.chatId));
 
   let memoryP: Promise<{ result: MemoryItem[]; ms: number }>;
   if (MEMORY_V2_ENABLED && input.senderHandle) {
@@ -484,11 +641,15 @@ export async function buildContext(
     ? timed(() => getRecentToolTraces(input.chatId, 10))
     : Promise.resolve({ result: [] as ToolTrace[], ms: 0 });
 
-  const profileP = input.senderHandle
+  const profileP = hasPreloadedProfile
+    ? Promise.resolve({ result: routerCtx!.preloadedProfile!, ms: 0 })
+    : input.senderHandle
     ? timed(() => getUserProfile(input.senderHandle))
     : Promise.resolve({ result: null, ms: 0 });
 
-  const accountsP = input.authUserId
+  const accountsP = hasPreloadedAccounts
+    ? Promise.resolve({ result: routerCtx!.preloadedAccounts!, ms: 0 })
+    : input.authUserId
     ? timed(() => getConnectedAccounts(input.authUserId!))
     : Promise.resolve({
       result: [] as import("../state.ts").ConnectedAccount[],
@@ -616,8 +777,13 @@ export async function buildContext(
     formatHistoryMs,
   };
 
+  const preloaded = [
+    hasPreloadedHistory && "history",
+    hasPreloadedProfile && "profile",
+    hasPreloadedAccounts && "accounts",
+  ].filter(Boolean);
   console.log(
-    `[build-context] sub-timings: history=${historyT.ms}ms memory=${memoryT.ms}ms summaries=${summariesT.ms}ms traces=${tracesT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms rag=${ragMs}ms wm=${workingMemoryMs}ms fmt=${formatHistoryMs}ms`,
+    `[build-context] sub-timings: history=${historyT.ms}ms memory=${memoryT.ms}ms summaries=${summariesT.ms}ms traces=${tracesT.ms}ms profile=${profileT.ms}ms accounts=${accountsT.ms}ms msgContent=${messageContentT.ms}ms rag=${ragMs}ms wm=${workingMemoryMs}ms fmt=${formatHistoryMs}ms${preloaded.length ? ` (preloaded: ${preloaded.join(", ")})` : ""}`,
   );
 
   return {

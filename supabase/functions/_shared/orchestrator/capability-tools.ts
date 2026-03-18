@@ -12,12 +12,13 @@ const CAPABILITY_TO_NAMESPACES: Record<Capability, ToolNamespace[]> = {
   'memory.read': ['memory.read'],
   'memory.write': ['memory.write'],
   'travel.search': ['travel.search'],
+  'reminders.manage': ['reminders.manage'],
   'deep_profile': ['memory.read', 'memory.write', 'knowledge.search', 'granola.read', 'email.read', 'calendar.read', 'contacts.read'],
 };
 
 const DOMAIN_BASE_TOOLS: Record<DomainTag, ToolNamespace[]> = {
   email: ['email.read', 'email.write', 'contacts.read', 'memory.read'],
-  calendar: ['calendar.read', 'calendar.write', 'contacts.read', 'memory.read', 'email.read', 'knowledge.search'],
+  calendar: ['calendar.read', 'calendar.write', 'contacts.read', 'memory.read', 'email.read', 'knowledge.search', 'reminders.manage'],
   meeting_prep: ['calendar.read', 'granola.read', 'email.read', 'contacts.read', 'knowledge.search', 'memory.read', 'web.search'],
   research: ['web.search', 'knowledge.search', 'contacts.read', 'memory.read', 'travel.search'],
   recall: ['memory.read', 'knowledge.search', 'granola.read'],
@@ -25,11 +26,11 @@ const DOMAIN_BASE_TOOLS: Record<DomainTag, ToolNamespace[]> = {
   general: [
     'memory.read', 'memory.write', 'email.read', 'email.write',
     'calendar.read', 'calendar.write', 'contacts.read', 'granola.read',
-    'web.search', 'knowledge.search', 'travel.search',
+    'web.search', 'knowledge.search', 'travel.search', 'reminders.manage',
   ],
 };
 
-const WRITE_CAPABILITIES: Set<string> = new Set(['email.write', 'calendar.write', 'memory.write']);
+const WRITE_CAPABILITIES: Set<string> = new Set(['email.write', 'calendar.write', 'memory.write', 'reminders.manage']);
 const COMPOUND_EXTRAS: ToolNamespace[] = ['contacts.read', 'memory.read'];
 
 const ALWAYS_INCLUDED: ToolNamespace[] = ['messaging.react'];
@@ -137,6 +138,7 @@ function namespaceToCap(ns: ToolNamespace): Capability | null {
     'memory.read': 'memory.read',
     'memory.write': 'memory.write',
     'travel.search': 'travel.search',
+    'reminders.manage': 'reminders.manage',
   };
   return map[ns] ?? null;
 }

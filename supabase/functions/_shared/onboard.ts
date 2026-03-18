@@ -14,13 +14,17 @@ const client = getOpenAIClient();
 const REACTION_TOOL: OpenAITool = {
   type: 'function',
   name: 'send_reaction',
-  description: 'Send an iMessage tapback reaction to the user\'s message. Only use standard tapbacks: love, like, dislike, laugh, emphasize, question.',
+  description: 'React to the user\'s message with an emoji. Standard tapbacks: love, like, dislike, laugh, emphasize, question. Or use type "custom" with custom_emoji for any emoji.',
   parameters: {
     type: 'object',
     properties: {
       type: {
         type: 'string',
-        enum: ['love', 'like', 'dislike', 'laugh', 'emphasize', 'question'],
+        enum: ['love', 'like', 'dislike', 'laugh', 'emphasize', 'question', 'custom'],
+      },
+      custom_emoji: {
+        type: 'string',
+        description: 'The emoji to react with when type is "custom".',
       },
     },
     required: ['type'],
@@ -45,7 +49,7 @@ const REMEMBER_USER_TOOL: OpenAITool = {
 const WEB_SEARCH_TOOL: OpenAITool = { type: 'web_search_preview' };
 
 export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
-export type Reaction = { type: StandardReactionType };
+export type Reaction = { type: StandardReactionType } | { type: 'custom'; emoji: string };
 
 // ============================================================================
 // System prompt builder — phased, entry-state-aware, value-first
@@ -162,7 +166,21 @@ WEDGE: ask_plan`;
     rescueBlock = `If the user seems stuck, ask: "What's on your mind?"`;
   }
 
-  return `You are Nest, a personal assistant people text. You are NOT a chatbot. You are NOT an AI assistant. Never describe yourself as AI, artificial intelligence, a bot, a chatbot, or anything technology-related. You are simply "Nest" or "a personal assistant you text."
+  const now = new Date();
+  const dateTimeStr = now.toLocaleString('en-AU', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'UTC',
+  });
+
+  return `Current date and time: ${dateTimeStr} UTC
+
+You are Nest, a personal assistant people text. You are NOT a chatbot. You are NOT an AI assistant. Never describe yourself as AI, artificial intelligence, a bot, a chatbot, or anything technology-related. You are simply "Nest" or "a personal assistant you text."
 
 If someone asks what you are, say something like "I'm Nest, your personal assistant" or "I'm Nest, I help people stay on top of things." Never explain your tech, who built you, or how you work.
 
@@ -180,7 +198,6 @@ This is a NEW user who hasn't verified yet. Your only job: be useful immediately
 - Reminders and follow-ups
 - Calendar integration
 - Email access
-- Proactive check-ins
 
 ## Response Style
 You are texting. Every message should feel like a text from a sharp, helpful friend. Short sentences. No essays. No walls of text. You have wit when appropriate.
@@ -223,8 +240,9 @@ You have a remember_user tool. You MUST call it whenever:
 NEVER just acknowledge info in text without saving it.
 
 ## Reactions
-You can react to messages using iMessage tapbacks, but TEXT RESPONSES ARE PREFERRED.
-Available reactions: love, like, dislike, laugh, emphasize, question
+You can react to messages with any emoji, but TEXT RESPONSES ARE PREFERRED.
+Standard tapbacks: love, like, dislike, laugh, emphasize, question.
+You can also use any emoji by setting type to "custom" and providing the emoji in custom_emoji.
 
 CRITICAL REACTION RULES:
 1. DEFAULT to text responses - reactions are supplementary
@@ -256,7 +274,7 @@ FORMAT: Always put the link on its own line, never embedded in text.
 - If they ask how you got their info: you didn't, someone gave them your number
 - If they ask if you're a bot or AI: deflect naturally. "I'm Nest, your personal assistant. Try me with something and see" then move on. Never confirm or deny.
 - If they ask what you cost: "don't worry about that right now, just try me out"
-- If they ask about privacy: "I only text when it's useful, and you can ignore me anytime. No setup needed."
+- If they ask about privacy or data security: keep it warm, not corporate. Key points: messages are encrypted, data isn't shared with anyone, they're in control and can ask you to forget anything anytime. Do NOT mention SOC2, provider names, or technical infrastructure.
 ${profileBlock}`;
 }
 
@@ -366,18 +384,8 @@ export async function onboardChat(
       content: m.content,
     }));
 
-  // First message — generate a natural greeting. PDL enrichment runs async.
+  // First message — generate a natural greeting. PDL enrichment moved to post-verification.
   if (isFirstMessage) {
-    if (!pdlContext) {
-      enrichByPhone(user.handle)
-        .then((result) => {
-          if (result) {
-            savePdlProfile(user.handle, result as unknown as Record<string, unknown>);
-          }
-        })
-        .catch(() => {});
-    }
-
     const greeting = await generateFirstGreeting(message, pdlContext);
     return {
       response: greeting,
@@ -484,7 +492,11 @@ async function callLLM(
         try { parsedArgs = JSON.parse(fc.arguments); } catch { /* empty */ }
 
         if (fc.name === 'send_reaction') {
-          reaction = { type: parsedArgs.type as StandardReactionType };
+          if (parsedArgs.type === 'custom' && parsedArgs.custom_emoji) {
+            reaction = { type: 'custom', emoji: parsedArgs.custom_emoji as string };
+          } else {
+            reaction = { type: parsedArgs.type as StandardReactionType };
+          }
           toolResults.push({ type: 'function_call_output', call_id: fc.call_id, output: 'Reaction sent.' });
         } else if (fc.name === 'remember_user') {
           rememberedUser = { name: parsedArgs.name as string | undefined, fact: parsedArgs.fact as string | undefined };

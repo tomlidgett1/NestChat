@@ -203,7 +203,7 @@ const REACTION_TOOL: Anthropic.Tool = {
 
 const EFFECT_TOOL: Anthropic.Tool = {
   name: 'send_effect',
-  description: 'Add a Sendblue expressive effect to your text response. ONLY use when the user explicitly asks for an effect. You MUST also write a text message - the effect enhances your text, it does not replace it. Do NOT use for normal conversation.',
+  description: 'Add an expressive iMessage effect to your text response. ONLY use when the user explicitly asks for an effect. You MUST also write a text message - the effect enhances your text, it does not replace it. Do NOT use for normal conversation.',
   input_schema: {
     type: 'object' as const,
     properties: {

@@ -1,6 +1,7 @@
 import type { TurnInput, TurnResult, TurnTrace } from "./types.ts";
 import {
   buildContext,
+  buildGroupContext,
   buildLightContext,
   buildMemoryLightContext,
   buildRouterContext,
@@ -288,12 +289,15 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     }
   }
 
-  // 3. Build context — select path based on memoryDepth (v2) or heuristics (legacy)
+  // 3. Build context — select path based on group/memoryDepth/heuristics
   const contextStart = Date.now();
   let useLightContext: boolean;
-  let contextPath: "full" | "light" | "memory-light";
+  let contextPath: "full" | "light" | "memory-light" | "group";
 
-  if (OPTION_A_ROUTING && route.memoryDepth !== undefined) {
+  if (input.isGroupChat) {
+    useLightContext = true;
+    contextPath = "group";
+  } else if (OPTION_A_ROUTING && route.memoryDepth !== undefined) {
     if (route.memoryDepth === "none") {
       useLightContext = true;
       contextPath = "light";
@@ -318,7 +322,9 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     contextPath = useLightContext ? "light" : "full";
   }
 
-  const context = contextPath === "light"
+  const context = contextPath === "group"
+    ? await buildGroupContext(input)
+    : contextPath === "light"
     ? await buildLightContext(input, routerCtx)
     : contextPath === "memory-light"
     ? await buildMemoryLightContext(input, routerCtx)
@@ -443,39 +449,40 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
       console.warn("[handle-turn] persistTurn failed:", (err as Error).message)
     );
 
-  // 9. Queue background work if needed (fire-and-forget)
-  const bgJobType = shouldQueueBackgroundWork(
-    input.userMessage,
-    loopResult.toolsUsed,
-  );
-  if (bgJobType) {
-    queueBackgroundJob({
-      jobType: bgJobType,
-      chatId: input.chatId,
-      senderHandle: input.senderHandle,
-      payload: { turnId, userMessage: input.userMessage.substring(0, 500) },
-      priority: "low",
-    }).catch((err) =>
-      console.warn("[handle-turn] background job queue failed:", err)
+  // 9-10. Skip background jobs and working memory for group chats (privacy)
+  if (!input.isGroupChat) {
+    const bgJobType = shouldQueueBackgroundWork(
+      input.userMessage,
+      loopResult.toolsUsed,
     );
-  }
+    if (bgJobType) {
+      queueBackgroundJob({
+        jobType: bgJobType,
+        chatId: input.chatId,
+        senderHandle: input.senderHandle,
+        payload: { turnId, userMessage: input.userMessage.substring(0, 500) },
+        priority: "low",
+      }).catch((err) =>
+        console.warn("[handle-turn] background job queue failed:", err)
+      );
+    }
 
-  // 10. Extract and persist working memory (fire-and-forget)
-  import("../state.ts")
-    .then(({ getPendingEmailSends }) => getPendingEmailSends(input.chatId))
-    .then((pendingEmailSends) =>
-      extractWorkingMemory(
-        input.userMessage,
-        loopResult.text,
-        loopResult.toolsUsed,
-        context.workingMemory,
-        pendingEmailSends,
+    import("../state.ts")
+      .then(({ getPendingEmailSends }) => getPendingEmailSends(input.chatId))
+      .then((pendingEmailSends) =>
+        extractWorkingMemory(
+          input.userMessage,
+          loopResult.text,
+          loopResult.toolsUsed,
+          context.workingMemory,
+          pendingEmailSends,
+        )
       )
-    )
-    .then((wm) => persistWorkingMemory(input.chatId, wm))
-    .catch((err) =>
-      console.warn("[handle-turn] working memory update failed:", err)
-    );
+      .then((wm) => persistWorkingMemory(input.chatId, wm))
+      .catch((err) =>
+        console.warn("[handle-turn] working memory update failed:", err)
+      );
+  }
 
   return {
     text: loopResult.text,

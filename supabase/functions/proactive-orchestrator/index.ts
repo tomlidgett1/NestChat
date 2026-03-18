@@ -1,7 +1,7 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getProactiveEligibleUsers } from '../_shared/state.ts';
 import { evaluateProactiveAction, executeProactiveAction } from '../_shared/proactive.ts';
-import { sendMessage } from '../_shared/sendblue.ts';
+import { sendMessage } from '../_shared/linq.ts';
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -43,17 +43,8 @@ Deno.serve(async (req) => {
 
         if (result.sent && result.message && user.botNumber) {
           const chatId = `DM#${user.botNumber}#${user.handle}`;
-          const conversation = {
-            chatId,
-            fromNumber: user.botNumber,
-            recipientNumber: user.handle,
-            isGroupChat: false,
-            groupId: null,
-            participants: [user.handle],
-            chatName: null,
-          };
 
-          await sendMessage(conversation, result.message);
+          await sendMessage(chatId, result.message);
           sent++;
           console.log(`[proactive] Sent ${action.type} to ${user.handle}`);
         } else if (action.type === 'hold') {

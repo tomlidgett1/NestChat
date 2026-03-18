@@ -940,6 +940,12 @@ async function finaliseJob(supabase: SupabaseClient, jobId: string): Promise<voi
 
   const failCount = failed?.length ?? 0;
 
+  const { data: jobRow } = await supabase
+    .from('ingestion_jobs')
+    .select('handle, total_documents')
+    .eq('id', jobId)
+    .maybeSingle();
+
   await supabase.from('ingestion_jobs').update({
     status: 'completed',
     error_message: failCount > 0 ? `${failCount} task(s) failed` : null,
@@ -947,6 +953,40 @@ async function finaliseJob(supabase: SupabaseClient, jobId: string): Promise<voi
   }).eq('id', jobId);
 
   console.log(`[ingest-pipeline] Job ${jobId} finalised${failCount > 0 ? ` (${failCount} failed)` : ''}`);
+
+  if (jobRow?.handle && (jobRow.total_documents ?? 0) > 0) {
+    triggerProfileBuild(jobRow.handle).catch((e) =>
+      console.warn(`[ingest-pipeline] Profile build trigger failed: ${(e as Error).message}`)
+    );
+  }
+}
+
+async function triggerProfileBuild(handle: string): Promise<void> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    const resp = await fetch(`${supabaseUrl}/functions/v1/build-profile`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ handle }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const status = resp.status;
+    console.log(`[ingest-pipeline] Profile build triggered for ${handle}: ${status}`);
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (msg.includes('abort')) {
+      console.log(`[ingest-pipeline] Profile build fire-and-forget for ${handle} (timed out, still running)`);
+    } else {
+      console.warn(`[ingest-pipeline] Profile build trigger failed for ${handle}:`, msg);
+    }
+  }
 }
 
 // ── Chaining ──────────────────────────────────────────────────

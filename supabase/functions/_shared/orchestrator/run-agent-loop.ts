@@ -41,6 +41,7 @@ import { executePoliciedToolCalls } from "../tools/executor.ts";
 import {
   composeCompactPrompt,
   composePrompt,
+  composeResearchLitePrompt,
 } from "../agents/prompt-layers.ts";
 
 type StandardReactionType =
@@ -74,7 +75,11 @@ function extractSideEffectsFromExecutor(
     if (!r.structuredData) continue;
 
     if (r.toolName === "send_reaction") {
-      reaction = { type: r.structuredData.type as StandardReactionType };
+      if (r.structuredData.type === "custom" && r.structuredData.custom_emoji) {
+        reaction = { type: "custom", emoji: r.structuredData.custom_emoji as string };
+      } else {
+        reaction = { type: r.structuredData.type as StandardReactionType };
+      }
     } else if (r.toolName === "send_effect") {
       effect = {
         type: r.structuredData.effect_type as "screen" | "bubble",
@@ -155,15 +160,29 @@ export async function runAgentLoop(
   const promptStart = Date.now();
 
   // Prompt mode is driven explicitly by routeLayer:
-  // - 0B-casual  → compact prompt, no tools, truncated history
-  // - 0B-knowledge → full prompt, no tools (Lane 2 namespaces are minimal)
+  // - 0B-casual    → compact prompt, no tools, truncated history (4 msgs)
+  // - 0B-research  → research-lite prompt, web tools kept, trimmed history (6 msgs)
+  // - 0B-knowledge → full prompt, tools from namespaces (knowledge.search + memory.read)
   // - 0A / 0C / undefined → full prompt, tools as resolved
   const isLane1 = routeLayer === "0B-casual";
-  const isLane2 = routeLayer === "0B-knowledge";
+  const isResearchLane = routeLayer === "0B-research";
 
-  const systemPrompt = isLane1
-    ? composeCompactPrompt(context, input)
-    : composePrompt(
+  let systemPrompt: string;
+  if (input.isGroupChat) {
+    const { buildGroupSystemPrompt, getGroupChat } = await import("../group.ts");
+    const group = await getGroupChat(input.chatId);
+    systemPrompt = buildGroupSystemPrompt({
+      participantNames: input.participantNames,
+      chatName: input.chatName,
+      groupVibe: (group?.groupVibe as import("../group.ts").GroupVibe) ?? "mixed",
+      timezone: input.timezone,
+    });
+  } else if (isLane1) {
+    systemPrompt = composeCompactPrompt(context, input);
+  } else if (isResearchLane) {
+    systemPrompt = composeResearchLitePrompt(context, input);
+  } else {
+    systemPrompt = composePrompt(
       agent,
       context,
       input,
@@ -171,12 +190,13 @@ export async function runAgentLoop(
       secondaryDomains,
       capabilities,
     );
+  }
   const promptComposeMs = Date.now() - promptStart;
 
   const filterStart = Date.now();
-  const availableTools = isLane1 || isLane2
+  const availableTools = isLane1
     ? []
-    : filterToolsByNamespace(allowedNamespaces);
+    : filterToolsByNamespace(allowedNamespaces); // 0B-research keeps tools
   const openaiTools: OpenAITool[] = availableTools.map(toOpenAITool);
   const geminiTools: GeminiTool[] = availableTools.length > 0
     ? toGeminiTools(availableTools)
@@ -205,6 +225,8 @@ export async function runAgentLoop(
 
   const recentHistory = isLane1
     ? context.formattedHistory.slice(-4)
+    : isResearchLane
+    ? context.formattedHistory.slice(-6)
     : context.formattedHistory;
   const apiInput: Record<string, unknown>[] = [
     ...recentHistory,
@@ -224,6 +246,7 @@ export async function runAgentLoop(
     chatId: input.chatId,
     senderHandle: input.senderHandle,
     authUserId: input.authUserId,
+    timezone: input.timezone ?? null,
     pendingEmailSend: context.pendingEmailSend,
     pendingEmailSends: context.pendingEmailSends,
   };
@@ -235,11 +258,15 @@ export async function runAgentLoop(
   const toolsUsed: Array<{ tool: string; detail?: string }> = [];
   const roundTraces: RoundTrace[] = [];
   let roundCount = 0;
-  let currentMaxOutputTokens = agent.maxOutputTokens;
+  let currentMaxOutputTokens = isResearchLane
+    ? Math.min(agent.maxOutputTokens, 2048)
+    : agent.maxOutputTokens;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
 
-  const maxRounds = agent.toolPolicy.maxToolRounds;
+  const maxRounds = isResearchLane
+    ? Math.min(agent.toolPolicy.maxToolRounds, 3)
+    : agent.toolPolicy.maxToolRounds;
 
   const userForcedToolChoice = detectForcedToolChoice(
     input.userMessage,
@@ -570,6 +597,25 @@ export async function runAgentLoop(
   const sideEffects = extractSideEffectsFromExecutor(allExecResults);
   let text = finalText.length > 0 ? finalText : null;
 
+  // Strip hallucinated tool tags — model may output [email_draft] etc. without
+  // having actually called those tools.
+  if (text) {
+    const executedToolNames = new Set(allExecResults.map((r) => r.toolName));
+    const KNOWN_TOOL_TAGS = new Set([
+      "email_read", "email_draft", "email_send", "email_update_draft", "email_cancel_draft",
+      "calendar_read", "calendar_write", "contacts_read", "travel_time", "places_search",
+      "semantic_search", "granola_read", "web_search", "plan_steps",
+    ]);
+    text = text.replace(/\[([a-z_]+)\]/g, (match, toolName) => {
+      if (KNOWN_TOOL_TAGS.has(toolName) && !executedToolNames.has(toolName)) {
+        return "";
+      }
+      return match;
+    });
+    text = text.replace(/ {2,}/g, " ").trim();
+    if (text.length === 0) text = null;
+  }
+
   const usedWebSearch = allToolTraces.some((trace) =>
     trace.name === "web_search"
   );
@@ -625,7 +671,9 @@ function summariseToolDetail(
 ): string | undefined {
   switch (name) {
     case "send_reaction":
-      return input.type as string;
+      return input.type === "custom" && input.custom_emoji
+        ? `custom:${input.custom_emoji}`
+        : input.type as string;
     case "send_effect":
       return input.effect as string;
     case "remember_user": {

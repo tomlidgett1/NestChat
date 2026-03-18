@@ -2,7 +2,11 @@ import 'dotenv/config';
 import express from 'express';
 import { verifySupabaseSetup, getSupabase } from './lib/supabase.js';
 import { createWebhookHandler } from './webhook/handler.js';
-import { sendMessage, markAsRead, startTyping, sendReaction } from './sendblue/client.js';
+// Local dev messaging stubs — production uses LINQ edge functions
+const sendMessage = async (..._args: unknown[]) => { console.warn('[local-dev] sendMessage is a no-op — use LINQ in production'); };
+const markAsRead = async (..._args: unknown[]) => {};
+const startTyping = async (..._args: unknown[]) => {};
+const sendReaction = async (..._args: unknown[]) => {};
 import { chat, getGroupChatAction, getTextForEffect, generateImage } from './claude-local-dev/client.js';
 import { getUserProfile, addMessage } from './state/conversation.js';
 import { debugDashboardHtml } from './debug/dashboard.js';
@@ -157,7 +161,7 @@ app.get('/debug/api/thread/:chatId', async (req, res) => {
   res.json((data || []).reverse());
 });
 
-// Webhook endpoint for Sendblue
+// Webhook endpoint (local dev)
 app.post(
   '/webhook',
   createWebhookHandler(async (message) => {
@@ -300,20 +304,15 @@ app.listen(PORT, () => {
   void verifySupabaseSetup();
   console.log(`
 ╔═══════════════════════════════════════════════════════╗
-║          Sendblue <-> Claude Bridge                   ║
+║          Nest Local Dev Server                        ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Server running on http://localhost:${PORT}              ║
 ║                                                       ║
 ║  Endpoints:                                           ║
-║    POST /webhook  - Sendblue webhook receiver         ║
+║    POST /webhook  - Webhook receiver (local dev)      ║
 ║    GET  /health   - Health check                      ║
 ║    GET  /debug    - Decision tree inspector            ║
 ║    GET  /compare  - Model comparison tool              ║
-║                                                       ║
-║  Next steps:                                          ║
-║    1. Run: ngrok http ${PORT}                            ║
-║    2. Configure webhook URL in Sendblue               ║
-║    3. Text your Sendblue number!                      ║
 ╚═══════════════════════════════════════════════════════╝
   `);
 });

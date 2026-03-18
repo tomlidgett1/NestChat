@@ -115,8 +115,8 @@ export async function insertEmbeddedChunks(
           handle,
           document_id: docId,
           embedding: chunk.embeddingStr,
-          embedding_model: "text-embedding-3-large",
-          model_version: "2024-01",
+          embedding_model: "gemini-embedding-2-preview",
+          model_version: "2026-03",
         };
       })
       .filter(Boolean) as Record<string, any>[];
@@ -184,8 +184,8 @@ async function insertSingleChunk(
     handle,
     document_id: docId,
     embedding: chunk.embeddingStr,
-    embedding_model: "text-embedding-3-large",
-    model_version: "2024-01",
+    embedding_model: "gemini-embedding-2-preview",
+    model_version: "2026-03",
   };
 
   const { error: embErr } = await supabase

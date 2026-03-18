@@ -158,15 +158,72 @@ async function callGemini(
 // Router
 // ═══════════════════════════════════════════════════════════════
 
-type Provider = 'openai' | 'anthropic' | 'gemini';
+// ═══════════════════════════════════════════════════════════════
+// Production — calls the real handleTurn pipeline via debug-dashboard edge function
+// ═══════════════════════════════════════════════════════════════
+
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+async function callProduction(
+  _model: string,
+  prompt: string,
+  _systemPrompt: string,
+  _history: ConversationMessage[],
+): Promise<{ text: string; tokens?: number; meta?: Record<string, unknown> }> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    throw new Error('SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured');
+  }
+
+  const url = `${SUPABASE_URL}/functions/v1/debug-dashboard?api=run-single`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+    },
+    body: JSON.stringify({ message: prompt, keepHistory: true }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Production pipeline error (${resp.status}): ${errText}`);
+  }
+
+  const result = await resp.json() as Record<string, unknown>;
+  const tokens = ((result.inputTokens as number) || 0) + ((result.outputTokens as number) || 0);
+
+  return {
+    text: (result.responseText as string) || (result.responsePreview as string) || '[no response]',
+    tokens,
+    meta: {
+      agent: result.agent,
+      model: result.model,
+      routeLayer: result.routeLayer,
+      isOnboarding: result.isOnboarding,
+      tools: result.tools,
+      toolCount: result.toolCount,
+      toolNames: result.toolNames,
+      rounds: result.rounds,
+      latencyMs: result.latencyMs,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      // Full trace object from the pipeline (mirrors debug dashboard)
+      trace: result.trace,
+    },
+  };
+}
+
+type Provider = 'openai' | 'anthropic' | 'gemini' | 'production';
 
 const CALLERS: Record<
   Provider,
-  (model: string, prompt: string, systemPrompt: string, history: ConversationMessage[]) => Promise<{ text: string; tokens?: number }>
+  (model: string, prompt: string, systemPrompt: string, history: ConversationMessage[]) => Promise<{ text: string; tokens?: number; meta?: Record<string, unknown> }>
 > = {
   openai: callOpenAI,
   anthropic: callAnthropic,
   gemini: callGemini,
+  production: callProduction,
 };
 
 export async function handleCompareChat(req: Request, res: Response) {
@@ -212,6 +269,8 @@ export async function handleCompareChat(req: Request, res: Response) {
       model,
       columnId: historyKey,
       historyLength: history.length + 2,
+      // Production pipeline metadata (agent, tools, routing info)
+      ...(result as { meta?: Record<string, unknown> }).meta ? { production: (result as { meta?: Record<string, unknown> }).meta } : {},
     });
   } catch (err) {
     const latencyMs = Date.now() - start;
@@ -225,6 +284,23 @@ export async function handleCompareClear(req: Request, res: Response) {
   const { sessionId } = req.body as { sessionId?: string };
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
   clearConversation(sessionId);
+
+  // Also clear the production-side DBG# conversation history
+  if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
+    try {
+      await fetch(`${SUPABASE_URL}/functions/v1/debug-dashboard?api=clear-history`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+        },
+        body: '{}',
+      });
+    } catch (e) {
+      console.warn('[compare] failed to clear production history:', e);
+    }
+  }
+
   console.log(`[compare] cleared conversation: ${sessionId}`);
   return res.json({ ok: true });
 }
@@ -255,10 +331,8 @@ export async function handleCompareUsers(_req: Request, res: Response) {
 
 // Scope labels matching production prompt-layers.ts
 const SCOPE_LABELS: Record<string, string> = {
-  'https://www.googleapis.com/auth/calendar': 'calendar',
   'https://www.googleapis.com/auth/calendar.events': 'calendar',
   'https://www.googleapis.com/auth/gmail.modify': 'email',
-  'https://www.googleapis.com/auth/gmail.send': 'email',
   'https://www.googleapis.com/auth/gmail.readonly': 'email',
   'https://www.googleapis.com/auth/contacts.readonly': 'contacts',
   'https://www.googleapis.com/auth/contacts.other.readonly': 'contacts',

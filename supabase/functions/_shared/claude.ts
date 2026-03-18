@@ -1,7 +1,7 @@
 import { getOpenAIClient, isGeminiModel, MODEL_MAP } from './ai/models.ts';
 import { geminiSimpleText } from './ai/gemini.ts';
 import { getConversation } from './state.ts';
-import type { Reaction } from './sendblue.ts';
+import type { Reaction } from './linq.ts';
 
 // ═══════════════════════════════════════════════════════════════
 // Shared OpenAI client (re-exported for backward compat)
@@ -78,7 +78,8 @@ IMPORTANT: BIAS TOWARD "respond" - text responses are almost always better than 
 
 Answer with ONE of these:
 - "respond" - Nest should send a text reply.
-- "react:love" or "react:like" or "react:laugh" - ONLY for brief acknowledgments where text would be weird.
+- "react:love" or "react:like" or "react:laugh" or "react:emphasize" - standard tapbacks, ONLY for brief acknowledgments where text would be weird.
+- "react:custom:EMOJI" - react with any emoji (e.g. "react:custom:🔥"), for when a specific emoji fits better than a standard tapback.
 - "ignore" - Human-to-human conversation not involving Nest at all`;
   const gcaUserMsg = `${contextBlock}New message from ${sender}: "${message}"\n\nHow should Nest handle this?`;
 
@@ -101,6 +102,11 @@ Answer with ONE of these:
     }
     if (answer.includes('respond')) return { action: 'respond' };
     if (answer.includes('react')) {
+      const customMatch = answer.match(/react:custom:(.+)/);
+      if (customMatch) {
+        const emoji = customMatch[1].trim();
+        return { action: 'react', reaction: { type: 'custom', emoji } };
+      }
       if (answer.includes('love')) return { action: 'react', reaction: { type: 'love' } };
       if (answer.includes('laugh')) return { action: 'react', reaction: { type: 'laugh' } };
       if (answer.includes('emphasize')) return { action: 'react', reaction: { type: 'emphasize' } };

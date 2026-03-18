@@ -219,6 +219,52 @@ const TESTS: TestCase[] = [
   },
 
   // ═══════════════════════════════════════════════════════════
+  // PERSONAL RECALL — user asking about their own past data
+  // ═══════════════════════════════════════════════════════════
+  {
+    message: "How many goals did I kick in my last game",
+    description: "Personal stats recall → Lane 3",
+    expectLane: "0C",
+    expectedBucket: "personal_recall",
+  },
+  {
+    message: "What did I eat for dinner on Friday",
+    description: "Personal activity recall → Lane 3",
+    expectLane: "0C",
+    expectedBucket: "personal_recall",
+  },
+  {
+    message: "When did I last see the dentist",
+    description: "Personal timeline recall → Lane 3",
+    expectLane: "0C",
+    expectedBucket: "personal_recall",
+  },
+  {
+    message: "Where did we go for our anniversary",
+    description: "Shared memory recall → Lane 3",
+    expectLane: "0C",
+    expectedBucket: "personal_recall",
+  },
+  {
+    message: "Did I ever tell you about my trip to Japan",
+    description: "Memory check → Lane 3",
+    expectLane: "0C",
+    expectedBucket: "personal_recall",
+  },
+  {
+    message: "Do you remember what I said about the project",
+    description: "Explicit memory recall → Lane 3",
+    expectLane: "0C",
+    expectedBucket: "personal_recall",
+  },
+  {
+    message: "Try again: How many goals did I kick in my last game",
+    description: "Retry + personal recall → Lane 3",
+    expectLane: "0C",
+    expectedBucket: "personal_recall",
+  },
+
+  // ═══════════════════════════════════════════════════════════
   // COMPOUND EDGE CASES — realistic multi-intent messages
   // ═══════════════════════════════════════════════════════════
   {

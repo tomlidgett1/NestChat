@@ -1,4 +1,5 @@
-import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT } from '../ai/models.ts';
+import { getOpenAIClient, MODEL_MAP, REASONING_EFFORT, isGeminiModel } from '../ai/models.ts';
+import { geminiSimpleText } from '../ai/gemini.ts';
 import type { WorkingMemory } from './types.ts';
 import type { PendingEmailSendAction } from '../state.ts';
 
@@ -32,7 +33,7 @@ export async function extractWorkingMemory(
   pendingEmailSends: PendingEmailSendAction[] = [],
 ): Promise<WorkingMemory> {
   try {
-    const client = getOpenAIClient();
+    const model = MODEL_MAP.orchestration;
 
     const turnSummary = [
       `User: ${userMessage.substring(0, 200)}`,
@@ -42,16 +43,29 @@ export async function extractWorkingMemory(
       previousMemory.pendingActions.length > 0 ? `Previous pending: ${previousMemory.pendingActions.map(a => a.description).join(', ')}` : '',
     ].filter(Boolean).join('\n');
 
-    const response = await client.responses.create({
-      model: MODEL_MAP.orchestration,
-      instructions: EXTRACTION_PROMPT,
-      input: turnSummary,
-      max_output_tokens: 1024,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.orchestration },
-    } as Parameters<typeof client.responses.create>[0]);
+    let text: string | null;
 
-    const text = response.output_text;
+    if (isGeminiModel(model)) {
+      const result = await geminiSimpleText({
+        model,
+        systemPrompt: EXTRACTION_PROMPT,
+        userMessage: turnSummary,
+        maxOutputTokens: 1024,
+      });
+      text = result.text;
+    } else {
+      const client = getOpenAIClient();
+      const response = await client.responses.create({
+        model,
+        instructions: EXTRACTION_PROMPT,
+        input: turnSummary,
+        max_output_tokens: 1024,
+        store: false,
+        reasoning: { effort: REASONING_EFFORT.orchestration },
+      } as Parameters<typeof client.responses.create>[0]);
+      text = response.output_text;
+    }
+
     if (!text) return previousMemory;
 
     const parsed = JSON.parse(text);

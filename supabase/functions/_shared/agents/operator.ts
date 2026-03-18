@@ -8,7 +8,7 @@ export const operatorAgent: AgentConfig = {
   modelTier: 'agent',
   maxOutputTokens: 16384,
   toolPolicy: {
-    allowedNamespaces: ['memory.read', 'memory.write', 'email.read', 'email.write', 'calendar.read', 'calendar.write', 'contacts.read', 'granola.read', 'web.search', 'knowledge.search', 'messaging.react', 'messaging.effect', 'media.generate', 'travel.search'],
+    allowedNamespaces: ['memory.read', 'memory.write', 'email.read', 'email.write', 'calendar.read', 'calendar.write', 'contacts.read', 'granola.read', 'web.search', 'knowledge.search', 'messaging.react', 'messaging.effect', 'media.generate', 'travel.search', 'reminders.manage'],
     blockedNamespaces: ['admin.internal'],
     maxToolRounds: 8,
   },
@@ -31,7 +31,7 @@ web_search: Search the web for current information
 remember_user: Save information about the user
 generate_image: Generate images from text prompts
 plan_steps: Decompose complex requests into ordered steps
-send_reaction / send_effect: iMessage reactions and effects
+send_reaction / send_effect: Emoji reactions (any emoji) and iMessage effects
 
 ## How to Present Emails and Drafts in iMessage
 Use **double asterisks** for key email labels like **To:**, **From:**, **Subject:**, **Sent:**. Also use bold for key headings when presenting summaries, insights, or multi-item results. Never use bullet points, numbered lists, or headers. Split into bubbles with "---".

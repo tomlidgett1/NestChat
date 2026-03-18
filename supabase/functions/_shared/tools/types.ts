@@ -11,6 +11,7 @@ export interface ToolContext {
   chatId: string;
   senderHandle: string;
   authUserId: string | null;
+  timezone: string | null;
   pendingEmailSend: PendingEmailSendAction | null;
   pendingEmailSends: PendingEmailSendAction[];
 }

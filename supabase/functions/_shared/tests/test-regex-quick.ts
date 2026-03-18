@@ -13,7 +13,7 @@ const WORKFLOW_VERBS =
   /\b(send|draft|book|remind|schedule|cancel|delete|create|update|forward|compose|set up|arrange)\b/i;
 
 const TEMPORAL_SIGNALS =
-  /\b(today|tomorrow|tonight|yesterday|this week|next week|next month|this weekend|right now|currently|latest|current|open now|later today|later tonight|this morning|this afternoon|this evening|this arvo|at the moment)\b/i;
+  /\b(today|tomorrow|tonight|yesterday|last night|last weekend|on the weekend|this week|next week|next month|this weekend|right now|currently|latest|current|open now|later today|later tonight|this morning|this afternoon|this evening|this arvo|at the moment)\b/i;
 
 const EXPLICIT_TIME =
   /\b\d{1,2}(:\d{2})?\s?(am|pm)\b/i;

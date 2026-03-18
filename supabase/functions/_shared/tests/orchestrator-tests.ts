@@ -1657,7 +1657,7 @@ const confirmContext: import("../orchestrator/build-context.ts").RouterContext =
   {
     recentTurns: [{
       role: "assistant",
-      content: "here is the draft --- would you like me to send it?",
+      content: "Here is the draft --- would you like me to send it?",
     }],
     workingMemory: emptyWorkingMemory(),
     pendingEmailSend: {

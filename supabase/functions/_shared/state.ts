@@ -1,6 +1,6 @@
-import { CONVERSATION_MESSAGES_TABLE, CONVERSATIONS_TABLE, JOB_FAILURES_TABLE, OUTBOUND_MESSAGES_TABLE, USER_PROFILES_TABLE, WEBHOOK_EVENTS_TABLE, MEMORY_ITEMS_TABLE, CONVERSATION_SUMMARIES_TABLE, TOOL_TRACES_TABLE, PENDING_ACTIONS_TABLE } from './env.ts';
+import { CONVERSATION_MESSAGES_TABLE, CONVERSATIONS_TABLE, JOB_FAILURES_TABLE, OUTBOUND_MESSAGES_TABLE, USER_PROFILES_TABLE, WEBHOOK_EVENTS_TABLE, MEMORY_ITEMS_TABLE, CONVERSATION_SUMMARIES_TABLE, TOOL_TRACES_TABLE, PENDING_ACTIONS_TABLE, REPORTED_BUGS_TABLE, REMINDERS_TABLE } from './env.ts';
 import { getAdminClient } from './supabase.ts';
-import type { MessageService, NormalisedIncomingMessage, SendblueWebhookEvent } from './sendblue.ts';
+import type { MessageService, NormalisedIncomingMessage } from './linq.ts';
 
 export interface StoredMessage {
   role: 'user' | 'assistant';
@@ -8,6 +8,24 @@ export interface StoredMessage {
   handle?: string;
   createdAt?: string;
   metadata?: Record<string, unknown>;
+}
+
+interface ReportedBugInsert {
+  chat_id: string;
+  sender_handle: string | null;
+  auth_user_id: string | null;
+  provider: string | null;
+  service: string | null;
+  message_text: string;
+  bug_text: string;
+  prior_messages: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    handle: string | null;
+    created_at: string | null;
+    metadata: Record<string, unknown>;
+  }>;
+  metadata: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -139,6 +157,8 @@ export interface UserProfile {
   useLinq: boolean;
   firstSeen: number;
   lastSeen: number;
+  deepProfileSnapshot: Record<string, unknown> | null;
+  deepProfileBuiltAt: string | null;
 }
 
 export interface ConnectedAccount {
@@ -182,6 +202,8 @@ interface UserProfileRow {
   use_linq: boolean;
   first_seen: number;
   last_seen: number;
+  deep_profile_snapshot: Record<string, unknown> | null;
+  deep_profile_built_at: string | null;
 }
 
 function sanitiseFacts(value: unknown): string[] {
@@ -191,7 +213,7 @@ function sanitiseFacts(value: unknown): string[] {
 export async function enqueueWebhookEvent(rawPayload: Record<string, unknown>, message: NormalisedIncomingMessage): Promise<{ eventId: number; created: boolean }> {
   const supabase = getAdminClient();
   const { data, error } = await supabase.rpc('enqueue_webhook_event', {
-    p_provider: 'sendblue',
+    p_provider: 'linq',
     p_provider_message_id: message.messageId,
     p_chat_id: message.chatId,
     p_sender_handle: message.from,
@@ -289,111 +311,6 @@ export async function logOutboundMessage(chatId: string, kind: string, payload: 
   }
 }
 
-function getOutboundChatId(event: SendblueWebhookEvent): string {
-  const groupId = event.group_id?.trim();
-  if (groupId) {
-    return `GROUP#${groupId}`;
-  }
-
-  const botNumber = event.sendblue_number?.trim() || event.from_number?.trim() || '';
-  const recipient = event.number?.trim() || event.to_number?.trim() || '';
-
-  if (botNumber && recipient) {
-    return `DM#${botNumber}#${recipient}`;
-  }
-
-  return `OUTBOUND#${event.message_handle?.trim() || 'unknown'}`;
-}
-
-function extractWebhookError(event: SendblueWebhookEvent): string | null {
-  const parts = [event.error_message, event.error_reason, event.error_detail]
-    .map((value) => value?.trim())
-    .filter(Boolean);
-
-  if (parts.length === 0) {
-    return null;
-  }
-
-  return parts.join(' | ');
-}
-
-export async function recordOutboundStatusWebhook(event: SendblueWebhookEvent): Promise<void> {
-  const messageId = event.message_handle?.trim();
-  if (!messageId) {
-    throw new Error('Outbound webhook missing message_handle');
-  }
-
-  const chatId = getOutboundChatId(event);
-  const errorText = extractWebhookError(event);
-  const supabase = getAdminClient();
-
-  const { error: statusEventError } = await supabase
-    .from('sendblue_status_events')
-    .insert({
-      provider_message_id: messageId,
-      chat_id: chatId,
-      direction: 'outbound',
-      status: event.status || 'UNKNOWN',
-      raw_payload: event,
-      error: errorText,
-    });
-
-  if (statusEventError) {
-    throw statusEventError;
-  }
-
-  const { data: existing, error: existingError } = await supabase
-    .from(OUTBOUND_MESSAGES_TABLE)
-    .select('id, kind, payload')
-    .eq('provider_message_id', messageId)
-    .maybeSingle<{ id: number; kind: string; payload: Record<string, unknown> | null }>();
-
-  if (existingError) {
-    throw existingError;
-  }
-
-  const payload = existing?.payload && typeof existing.payload === 'object'
-    ? {
-        ...existing.payload,
-        status_webhook: event,
-      }
-    : { status_webhook: event };
-
-  if (existing) {
-    const { error } = await supabase
-      .from(OUTBOUND_MESSAGES_TABLE)
-      .update({
-        chat_id: chatId,
-        payload,
-        status: event.status || 'UNKNOWN',
-        error: errorText,
-        sent_at: new Date(event.date_updated || event.date_sent || new Date().toISOString()).toISOString(),
-      })
-      .eq('id', existing.id);
-
-    if (error) {
-      throw error;
-    }
-
-    return;
-  }
-
-  const { error } = await supabase
-    .from(OUTBOUND_MESSAGES_TABLE)
-    .insert({
-      chat_id: chatId,
-      kind: 'status_update',
-      payload,
-      provider_message_id: messageId,
-      status: event.status || 'UNKNOWN',
-      error: errorText,
-      sent_at: new Date(event.date_updated || event.date_sent || new Date().toISOString()).toISOString(),
-    });
-
-  if (error) {
-    throw error;
-  }
-}
 
 export async function getConversation(chatId: string, limit = 20): Promise<StoredMessage[]> {
   const supabase = getAdminClient();
@@ -414,6 +331,51 @@ export async function getConversation(chatId: string, limit = 20): Promise<Store
     createdAt: row.created_at,
     ...(row.metadata && Object.keys(row.metadata).length > 0 ? { metadata: row.metadata } : {}),
   }));
+}
+
+export async function reportBug(params: {
+  chatId: string;
+  senderHandle?: string | null;
+  authUserId?: string | null;
+  provider?: string | null;
+  service?: string | null;
+  messageText: string;
+  bugText: string;
+  priorMessages: StoredMessage[];
+  metadata?: Record<string, unknown>;
+}): Promise<number | null> {
+  const supabase = getAdminClient();
+
+  const insertPayload: ReportedBugInsert = {
+    chat_id: params.chatId,
+    sender_handle: params.senderHandle ?? null,
+    auth_user_id: params.authUserId ?? null,
+    provider: params.provider ?? null,
+    service: params.service ?? null,
+    message_text: params.messageText,
+    bug_text: params.bugText,
+    prior_messages: params.priorMessages.slice(-10).map((m) => ({
+      role: m.role,
+      content: m.content,
+      handle: m.handle ?? null,
+      created_at: m.createdAt ?? null,
+      metadata: m.metadata ?? {},
+    })),
+    metadata: params.metadata ?? {},
+  };
+
+  const { data, error } = await supabase
+    .from(REPORTED_BUGS_TABLE)
+    .insert(insertPayload)
+    .select('id')
+    .maybeSingle<{ id: number }>();
+
+  if (error) {
+    console.error('[state] Failed to report bug:', error);
+    return null;
+  }
+
+  return data?.id ?? null;
 }
 
 export async function addMessage(
@@ -462,7 +424,7 @@ export async function getUserProfile(handle: string): Promise<UserProfile | null
   const supabase = getAdminClient();
   const { data, error } = await supabase
     .from(USER_PROFILES_TABLE)
-    .select('handle, name, facts, use_linq, first_seen, last_seen')
+    .select('handle, name, facts, use_linq, first_seen, last_seen, deep_profile_snapshot, deep_profile_built_at')
     .eq('handle', handle)
     .maybeSingle<UserProfileRow>();
 
@@ -482,6 +444,8 @@ export async function getUserProfile(handle: string): Promise<UserProfile | null
     useLinq: data.use_linq ?? false,
     firstSeen: data.first_seen,
     lastSeen: data.last_seen,
+    deepProfileSnapshot: data.deep_profile_snapshot ?? null,
+    deepProfileBuiltAt: data.deep_profile_built_at ?? null,
   };
 }
 
@@ -1259,7 +1223,6 @@ export interface NestUser {
   firstValueWedge: string | null;
   firstValueDeliveredAt: string | null;
   secondEngagementAt: string | null;
-  checkinOptIn: boolean | null;
   activationScore: number;
   capabilityCategoriesUsed: string[];
   lastProactiveSentAt: string | null;
@@ -1286,7 +1249,6 @@ interface EnsureNestUserRow {
   out_first_value_wedge: string | null;
   out_first_value_delivered_at: string | null;
   out_second_engagement_at: string | null;
-  out_checkin_opt_in: boolean | null;
   out_activation_score: number;
   out_capability_categories_used: string[];
   out_last_proactive_sent_at: string | null;
@@ -1322,7 +1284,6 @@ function rowToNestUser(row: EnsureNestUserRow): NestUser {
     firstValueWedge: row.out_first_value_wedge ?? null,
     firstValueDeliveredAt: row.out_first_value_delivered_at ?? null,
     secondEngagementAt: row.out_second_engagement_at ?? null,
-    checkinOptIn: row.out_checkin_opt_in ?? null,
     activationScore: row.out_activation_score ?? 0,
     capabilityCategoriesUsed: row.out_capability_categories_used ?? [],
     lastProactiveSentAt: row.out_last_proactive_sent_at ?? null,
@@ -1421,7 +1382,7 @@ export async function getUserByToken(token: string): Promise<NestUser | null> {
   const supabase = getAdminClient();
   const { data, error } = await supabase
     .from(USER_PROFILES_TABLE)
-    .select('handle, name, status, onboarding_token, onboard_messages, onboard_count, bot_number, pdl_profile, auth_user_id, onboard_state, entry_state, first_value_wedge, first_value_delivered_at, second_engagement_at, checkin_opt_in, activation_score, capability_categories_used, last_proactive_sent_at, last_proactive_ignored, proactive_ignore_count, recovery_nudge_sent_at, timezone, first_seen, last_seen')
+    .select('handle, name, status, onboarding_token, onboard_messages, onboard_count, bot_number, pdl_profile, auth_user_id, onboard_state, entry_state, first_value_wedge, first_value_delivered_at, second_engagement_at, activation_score, capability_categories_used, last_proactive_sent_at, last_proactive_ignored, proactive_ignore_count, recovery_nudge_sent_at, timezone, first_seen, last_seen')
     .eq('onboarding_token', token)
     .maybeSingle();
 
@@ -1447,7 +1408,6 @@ export async function getUserByToken(token: string): Promise<NestUser | null> {
     firstValueWedge: data.first_value_wedge ?? null,
     firstValueDeliveredAt: data.first_value_delivered_at ?? null,
     secondEngagementAt: data.second_engagement_at ?? null,
-    checkinOptIn: data.checkin_opt_in ?? null,
     activationScore: data.activation_score ?? 0,
     capabilityCategoriesUsed: data.capability_categories_used ?? [],
     lastProactiveSentAt: data.last_proactive_sent_at ?? null,
@@ -1472,9 +1432,6 @@ export type OnboardState =
   | 'follow_through_pending'
   | 'follow_through_delivered'
   | 'second_engagement_observed'
-  | 'checkin_permission_eligible'
-  | 'checkin_opted_in'
-  | 'checkin_declined'
   | 'memory_moment_eligible'
   | 'memory_moment_delivered'
   | 'referral_eligible'
@@ -1515,11 +1472,6 @@ export type OnboardingEventType =
   | 'recovery_nudge_sent'
   | 'recovery_nudge_ignored'
   | 'recovery_nudge_replied'
-  | 'checkin_permission_offered'
-  | 'checkin_permission_accepted'
-  | 'checkin_permission_declined'
-  | 'morning_checkin_sent'
-  | 'morning_checkin_replied'
   | 'proactive_hold_due_to_spam_rule'
   | 'memory_candidate_generated'
   | 'memory_candidate_rejected_low_confidence'
@@ -1580,7 +1532,6 @@ export interface StateTransitionParams {
   firstValueDelivered?: boolean;
   followThroughDelivered?: boolean;
   secondEngagement?: boolean;
-  checkinOptIn?: boolean;
   memoryMomentDelivered?: boolean;
   activated?: boolean;
   atRisk?: boolean;
@@ -1598,7 +1549,7 @@ export async function transitionOnboardState(params: StateTransitionParams): Pro
     p_first_value_delivered: params.firstValueDelivered ?? false,
     p_follow_through_delivered: params.followThroughDelivered ?? false,
     p_second_engagement: params.secondEngagement ?? false,
-    p_checkin_opt_in: params.checkinOptIn ?? null,
+    p_checkin_opt_in: null,
     p_memory_moment_delivered: params.memoryMomentDelivered ?? false,
     p_activated: params.activated ?? false,
     p_at_risk: params.atRisk ?? false,
@@ -1658,8 +1609,6 @@ export interface ProactiveEligibleUser {
   firstValueDeliveredAt: string | null;
   followThroughDeliveredAt: string | null;
   secondEngagementAt: string | null;
-  checkinOptIn: boolean | null;
-  checkinDeclineAt: string | null;
   memoryMomentDeliveredAt: string | null;
   activatedAt: string | null;
   lastProactiveSentAt: string | null;
@@ -1697,8 +1646,6 @@ export async function getProactiveEligibleUsers(limit = 20): Promise<ProactiveEl
     firstValueDeliveredAt: row.first_value_delivered_at as string | null,
     followThroughDeliveredAt: row.follow_through_delivered_at as string | null,
     secondEngagementAt: row.second_engagement_at as string | null,
-    checkinOptIn: row.checkin_opt_in as boolean | null,
-    checkinDeclineAt: row.checkin_decline_at as string | null,
     memoryMomentDeliveredAt: row.memory_moment_delivered_at as string | null,
     activatedAt: row.activated_at as string | null,
     lastProactiveSentAt: row.last_proactive_sent_at as string | null,
@@ -1749,4 +1696,178 @@ export async function getUserExperiments(handle: string): Promise<Record<string,
     result[row.experiment_name] = row.variant;
   }
   return result;
+}
+
+// ============================================================================
+// Reminders
+// ============================================================================
+
+export interface Reminder {
+  id: number;
+  handle: string;
+  chatId: string | null;
+  actionDescription: string;
+  cronExpression: string | null;
+  repeating: boolean;
+  nextFireAt: string | null;
+  lastFiredAt: string | null;
+  timezone: string;
+  createdAt: string;
+}
+
+interface DueReminderRow {
+  id: number;
+  handle: string;
+  chat_id: string | null;
+  action_description: string;
+  cron_expression: string | null;
+  repeating: boolean;
+  timezone: string;
+}
+
+interface UserReminderRow {
+  id: number;
+  action_description: string;
+  cron_expression: string | null;
+  repeating: boolean;
+  next_fire_at: string | null;
+  last_fired_at: string | null;
+  timezone: string;
+  created_at: string;
+}
+
+export async function insertReminder(params: {
+  handle: string;
+  chatId?: string | null;
+  actionDescription: string;
+  cronExpression?: string | null;
+  repeating: boolean;
+  nextFireAt: string | null;
+  timezone: string;
+}): Promise<number | null> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('insert_reminder', {
+    p_handle: params.handle,
+    p_chat_id: params.chatId ?? null,
+    p_action_description: params.actionDescription,
+    p_cron_expression: params.cronExpression ?? null,
+    p_repeating: params.repeating,
+    p_next_fire_at: params.nextFireAt,
+    p_timezone: params.timezone,
+  });
+
+  if (error) {
+    console.error('[state] Error inserting reminder:', error.message);
+    return null;
+  }
+
+  return data as number;
+}
+
+export async function getDueReminders(): Promise<Array<{
+  id: number;
+  handle: string;
+  chatId: string | null;
+  actionDescription: string;
+  cronExpression: string | null;
+  repeating: boolean;
+  timezone: string;
+}>> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('get_due_reminders');
+
+  if (error) {
+    console.error('[state] Error getting due reminders:', error.message);
+    return [];
+  }
+
+  return ((data as DueReminderRow[] | null) || []).map((row) => ({
+    id: row.id,
+    handle: row.handle,
+    chatId: row.chat_id,
+    actionDescription: row.action_description,
+    cronExpression: row.cron_expression,
+    repeating: row.repeating,
+    timezone: row.timezone,
+  }));
+}
+
+export async function markReminderFired(id: number, nextFireAt: string | null): Promise<void> {
+  const supabase = getAdminClient();
+  const { error } = await supabase.rpc('mark_reminder_fired', {
+    p_id: id,
+    p_next_fire_at: nextFireAt,
+  });
+
+  if (error) {
+    console.error('[state] Error marking reminder fired:', error.message);
+  }
+}
+
+export async function getUserReminders(handle: string): Promise<Reminder[]> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('get_user_reminders', {
+    p_handle: handle,
+  });
+
+  if (error) {
+    console.error('[state] Error getting user reminders:', error.message);
+    return [];
+  }
+
+  return ((data as UserReminderRow[] | null) || []).map((row) => ({
+    id: row.id,
+    handle,
+    chatId: null,
+    actionDescription: row.action_description,
+    cronExpression: row.cron_expression,
+    repeating: row.repeating,
+    nextFireAt: row.next_fire_at,
+    lastFiredAt: row.last_fired_at,
+    timezone: row.timezone,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function deleteReminder(id: number, handle: string): Promise<boolean> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('delete_reminder', {
+    p_id: id,
+    p_handle: handle,
+  });
+
+  if (error) {
+    console.error('[state] Error deleting reminder:', error.message);
+    return false;
+  }
+
+  return data as boolean;
+}
+
+export async function editReminder(params: {
+  id: number;
+  handle: string;
+  actionDescription?: string;
+  cronExpression?: string;
+  nextFireAt?: string;
+  repeating?: boolean;
+  active?: boolean;
+}): Promise<boolean> {
+  const supabase = getAdminClient();
+  const { data, error } = await supabase.rpc('edit_reminder', {
+    p_id: params.id,
+    p_handle: params.handle,
+    p_action_description: params.actionDescription ?? null,
+    p_cron_expression: params.cronExpression ?? null,
+    p_next_fire_at: params.nextFireAt ?? null,
+    p_repeating: params.repeating ?? null,
+    p_active: params.active ?? null,
+  });
+
+  if (error) {
+    console.error('[state] Error editing reminder:', error.message);
+    return false;
+  }
+
+  return data as boolean;
 }

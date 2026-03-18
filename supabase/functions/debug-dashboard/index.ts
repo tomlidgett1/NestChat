@@ -25,17 +25,46 @@ const testRunStore: Record<string, {
   error?: string;
 }> = {};
 
-async function runSingleTestCase(message: string, expectedAgent?: string): Promise<Record<string, unknown>> {
+async function runSingleTestCase(
+  message: string,
+  expectedAgent?: string,
+  opts?: { keepHistory?: boolean; forceOnboarding?: boolean },
+): Promise<Record<string, unknown>> {
   const { handleTurn } = await import('../_shared/orchestrator/handle-turn.ts');
-  const { ensureNestUser, clearConversation, cancelPendingEmailSends } = await import('../_shared/state.ts');
+  const { ensureNestUser, clearConversation, cancelPendingEmailSends, getUserTimezone } = await import('../_shared/state.ts');
 
   const SENDER_HANDLE = '+61414187820';
   const BOT_NUMBER = '+13466215973';
   const CHAT_ID = `DBG#${BOT_NUMBER}#${SENDER_HANDLE}`;
 
-  const authUserId = await ensureNestUser(SENDER_HANDLE);
-  await clearConversation(CHAT_ID);
-  await cancelPendingEmailSends(authUserId);
+  // Mirror production: ensureNestUser returns NestUser with status, authUserId, etc.
+  const nestUser = await ensureNestUser(SENDER_HANDLE, BOT_NUMBER);
+  const authUserId = nestUser.authUserId ?? null;
+
+  if (!opts?.keepHistory) {
+    await clearConversation(CHAT_ID);
+    await cancelPendingEmailSends(CHAT_ID);
+  }
+
+  // Mirror production: onboarding is determined by nestUser.status
+  // Allow override for testing onboarding scenarios with an active user
+  const isOnboarding = opts?.forceOnboarding ?? (nestUser.status !== 'active');
+
+  // deno-lint-ignore no-explicit-any
+  let onboardingContext: any;
+  if (isOnboarding) {
+    const onboardUrl = `https://nest.expert/?token=${nestUser.onboardingToken}`;
+    onboardingContext = {
+      nestUser,
+      onboardUrl,
+      experimentVariants: {},
+    };
+  }
+
+  // Mirror production: resolve timezone
+  const userTimezone = nestUser.timezone ??
+    await getUserTimezone(SENDER_HANDLE).catch(() => null) ??
+    'Australia/Melbourne';
 
   const start = Date.now();
   const result = await handleTurn({
@@ -48,10 +77,10 @@ async function runSingleTestCase(message: string, expectedAgent?: string): Promi
     participantNames: [],
     chatName: null,
     authUserId,
-    isOnboarding: false,
+    isOnboarding,
+    onboardingContext: isOnboarding ? onboardingContext as any : undefined,
     service: 'imessage',
-    botNumber: BOT_NUMBER,
-    timezone: 'Australia/Melbourne',
+    timezone: userTimezone,
   });
   const latencyMs = Date.now() - start;
 
@@ -62,14 +91,65 @@ async function runSingleTestCase(message: string, expectedAgent?: string): Promi
     agent: trace.agentName ?? '?',
     model: trace.modelUsed ?? '?',
     routeLayer: trace.routeLayer ?? '?',
+    isOnboarding,
     tools: (trace.toolCalls ?? []).map((tc: { name: string }) => tc.name),
     toolCount: trace.toolCallCount ?? 0,
+    toolNames: trace.availableToolNames ?? [],
     inputTokens: trace.inputTokens ?? 0,
     outputTokens: trace.outputTokens ?? 0,
     rounds: trace.agentLoopRounds ?? 0,
+    responseText: result.text ?? '',
     responsePreview: (result.text ?? '').substring(0, 300),
     responseLength: (result.text ?? '').length,
     pass: expectedAgent ? (trace.agentName === expectedAgent) : null,
+    // Full trace for debug panel (mirrors debug dashboard)
+    trace: {
+      // Routing
+      routeReason: trace.routeReason ?? null,
+      routeFastPath: trace.routeDecision?.fastPathUsed ?? false,
+      routeConfidence: trace.routeDecision?.confidence ?? null,
+      routeMode: trace.routeDecision?.mode ?? null,
+      routeNamespaces: trace.routeDecision?.allowedNamespaces ?? [],
+      matchedDisqualifierBucket: trace.matchedDisqualifierBucket ?? null,
+      hadPendingState: trace.hadPendingState ?? false,
+      classifierLatencyMs: trace.classifierLatencyMs ?? 0,
+      routeLatencyMs: trace.routerContextMs ?? 0,
+      // Context
+      systemPromptLength: trace.systemPromptLength ?? 0,
+      systemPrompt: trace.systemPrompt ?? null,
+      memoryItemsLoaded: trace.memoryItemsLoaded ?? 0,
+      ragEvidenceBlocks: trace.ragEvidenceBlocks ?? 0,
+      summariesLoaded: trace.summariesLoaded ?? 0,
+      connectedAccountsCount: trace.connectedAccountsCount ?? 0,
+      historyMessagesCount: trace.historyMessagesCount ?? 0,
+      contextBuildLatencyMs: trace.contextBuildLatencyMs ?? 0,
+      contextPath: trace.contextPath ?? null,
+      // Agent
+      agentName: trace.agentName ?? '?',
+      modelUsed: trace.modelUsed ?? '?',
+      agentLoopRounds: trace.agentLoopRounds ?? 0,
+      agentLoopLatencyMs: trace.agentLoopLatencyMs ?? 0,
+      promptComposeMs: trace.promptComposeMs ?? 0,
+      toolFilterMs: trace.toolFilterMs ?? 0,
+      // Tools
+      toolCalls: trace.toolCalls ?? [],
+      toolCallsBlocked: trace.toolCallsBlocked ?? [],
+      toolCallCount: trace.toolCallCount ?? 0,
+      toolTotalLatencyMs: trace.toolTotalLatencyMs ?? 0,
+      // Tokens
+      inputTokens: trace.inputTokens ?? 0,
+      outputTokens: trace.outputTokens ?? 0,
+      // Response
+      responseLength: trace.responseLength ?? 0,
+      totalLatencyMs: trace.totalLatencyMs ?? 0,
+      // Error
+      errorMessage: trace.errorMessage ?? null,
+      errorStage: trace.errorStage ?? null,
+      // Timezone
+      timezoneResolved: trace.timezoneResolved ?? null,
+      // Available tools
+      availableToolNames: trace.availableToolNames ?? [],
+    },
   };
 }
 
@@ -128,8 +208,31 @@ Deno.serve(async (req) => {
   if (req.method === 'POST' && url.searchParams.get('api') === 'run-single') {
     try {
       const body = await req.json();
-      const result = await runSingleTestCase(body.message, body.expectedAgent);
+      const result = await runSingleTestCase(body.message, body.expectedAgent, {
+        keepHistory: body.keepHistory ?? false,
+        forceOnboarding: body.forceOnboarding ?? undefined,
+      });
       return new Response(JSON.stringify(result), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({ error: (err as Error).message }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  // API: POST /debug-dashboard?api=clear-history — clear the DBG# conversation history
+  if (req.method === 'POST' && url.searchParams.get('api') === 'clear-history') {
+    try {
+      const { clearConversation, cancelPendingEmailSends } = await import('../_shared/state.ts');
+      const SENDER_HANDLE = '+61414187820';
+      const BOT_NUMBER = '+13466215973';
+      const CHAT_ID = `DBG#${BOT_NUMBER}#${SENDER_HANDLE}`;
+      await clearConversation(CHAT_ID);
+      await cancelPendingEmailSends(CHAT_ID);
+      return new Response(JSON.stringify({ ok: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     } catch (err) {

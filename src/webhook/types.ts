@@ -1,4 +1,18 @@
-import type { ConversationTarget, MessageEffect, MessageService } from '../sendblue/client.js';
+// Local dev webhook types (legacy — production uses LINQ edge functions)
+
+export type MessageService = 'iMessage' | 'SMS' | 'RCS';
+export type MessageEffect = { type: 'screen' | 'bubble'; name: string };
+
+export interface ConversationTarget {
+  chatId: string;
+  fromNumber: string;
+  recipientNumber: string;
+  isGroupChat: boolean;
+  groupId: string | null;
+  participants: string[];
+  chatName: string | null;
+  service?: MessageService;
+}
 
 export interface SendblueWebhookEvent {
   accountEmail?: string;
@@ -54,10 +68,7 @@ const SCREEN_EFFECTS = new Set(['celebration', 'shooting_star', 'fireworks', 'la
 const BUBBLE_EFFECTS = new Set(['invisible', 'gentle', 'loud', 'slam']);
 
 function normaliseService(service?: string): MessageService | undefined {
-  if (!service) {
-    return undefined;
-  }
-
+  if (!service) return undefined;
   const value = service.toLowerCase();
   if (value === 'imessage') return 'iMessage';
   if (value === 'sms') return 'SMS';
@@ -66,30 +77,19 @@ function normaliseService(service?: string): MessageService | undefined {
 }
 
 function normaliseStyleToEffect(style?: string): MessageEffect | undefined {
-  if (!style) {
-    return undefined;
-  }
-
-  if (SCREEN_EFFECTS.has(style)) {
-    return { type: 'screen', name: style };
-  }
-
-  if (BUBBLE_EFFECTS.has(style)) {
-    return { type: 'bubble', name: style };
-  }
-
+  if (!style) return undefined;
+  if (SCREEN_EFFECTS.has(style)) return { type: 'screen', name: style };
+  if (BUBBLE_EFFECTS.has(style)) return { type: 'bubble', name: style };
   return undefined;
 }
 
 function inferMimeType(url: string): string | null {
   const pathname = new URL(url).pathname.toLowerCase();
-
   for (const extension of IMAGE_EXTENSIONS) {
     if (pathname.endsWith(extension)) {
       return extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : `image/${extension.slice(1)}`;
     }
   }
-
   for (const extension of AUDIO_EXTENSIONS) {
     if (pathname.endsWith(extension)) {
       if (extension === '.m4a') return 'audio/mp4';
@@ -97,33 +97,20 @@ function inferMimeType(url: string): string | null {
       return `audio/${extension.slice(1)}`;
     }
   }
-
   return null;
 }
 
 function extractMedia(mediaUrl?: string): { images: ExtractedMedia[]; audio: ExtractedMedia[] } {
-  if (!mediaUrl) {
-    return { images: [], audio: [] };
-  }
-
+  if (!mediaUrl) return { images: [], audio: [] };
   try {
     const mimeType = inferMimeType(mediaUrl);
-    if (!mimeType) {
-      return { images: [], audio: [] };
-    }
-
+    if (!mimeType) return { images: [], audio: [] };
     const media = { url: mediaUrl, mimeType };
-    if (mimeType.startsWith('image/')) {
-      return { images: [media], audio: [] };
-    }
-
-    if (mimeType.startsWith('audio/')) {
-      return { images: [], audio: [media] };
-    }
+    if (mimeType.startsWith('image/')) return { images: [media], audio: [] };
+    if (mimeType.startsWith('audio/')) return { images: [], audio: [media] };
   } catch {
     return { images: [], audio: [] };
   }
-
   return { images: [], audio: [] };
 }
 
@@ -132,17 +119,12 @@ export function isInboundReceiveWebhook(event: SendblueWebhookEvent): boolean {
 }
 
 export function normaliseIncomingMessage(event: SendblueWebhookEvent): NormalisedIncomingMessage | null {
-  if (!isInboundReceiveWebhook(event)) {
-    return null;
-  }
+  if (!isInboundReceiveWebhook(event)) return null;
 
   const from = event.from_number?.trim();
   const botNumber = (event.sendblue_number || event.to_number)?.trim();
   const messageId = event.message_handle?.trim();
-
-  if (!from || !botNumber || !messageId) {
-    return null;
-  }
+  if (!from || !botNumber || !messageId) return null;
 
   const participants = Array.from(new Set((event.participants || []).map(participant => participant.trim()).filter(Boolean)));
   const groupId = event.group_id?.trim() || null;

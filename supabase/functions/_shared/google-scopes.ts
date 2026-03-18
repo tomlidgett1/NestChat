@@ -1,10 +1,8 @@
 export const GOOGLE_SCOPES = {
   EMAIL: 'email',
   PROFILE: 'profile',
-  CALENDAR: 'https://www.googleapis.com/auth/calendar',
   CALENDAR_EVENTS: 'https://www.googleapis.com/auth/calendar.events',
   GMAIL_MODIFY: 'https://www.googleapis.com/auth/gmail.modify',
-  GMAIL_SEND: 'https://www.googleapis.com/auth/gmail.send',
   CONTACTS_READONLY: 'https://www.googleapis.com/auth/contacts.readonly',
   CONTACTS_OTHER_READONLY: 'https://www.googleapis.com/auth/contacts.other.readonly',
   DRIVE_READONLY: 'https://www.googleapis.com/auth/drive.readonly',
@@ -16,10 +14,8 @@ export type GoogleScopeValue = (typeof GOOGLE_SCOPES)[GoogleScopeKey];
 export const BASE_SCOPES: string[] = [
   GOOGLE_SCOPES.EMAIL,
   GOOGLE_SCOPES.PROFILE,
-  GOOGLE_SCOPES.CALENDAR,
   GOOGLE_SCOPES.CALENDAR_EVENTS,
   GOOGLE_SCOPES.GMAIL_MODIFY,
-  GOOGLE_SCOPES.GMAIL_SEND,
   GOOGLE_SCOPES.CONTACTS_READONLY,
   GOOGLE_SCOPES.CONTACTS_OTHER_READONLY,
 ];

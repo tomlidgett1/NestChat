@@ -3,7 +3,7 @@ import type {
   MessageEffect,
   MessageService,
   Reaction,
-} from "../sendblue.ts";
+} from "../linq.ts";
 import type {
   ConnectedAccount,
   ConversationSummary,
@@ -54,6 +54,7 @@ export type ToolNamespace =
   | "messaging.effect"
   | "media.generate"
   | "travel.search"
+  | "reminders.manage"
   | "admin.internal";
 
 export type SideEffect = "read" | "draft" | "commit";
@@ -83,6 +84,7 @@ export type Capability =
   | "memory.read"
   | "memory.write"
   | "travel.search"
+  | "reminders.manage"
   | "deep_profile";
 
 export type MemoryDepth = "none" | "light" | "full";
@@ -141,7 +143,7 @@ export interface RouteDecision {
   classifierResult?: ClassifierResult;
   memoryDepth?: MemoryDepth;
   forcedToolChoice?: string;
-  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0C";
+  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0B-research" | "0B-group" | "0C";
   routeReason?: string;
   matchedDisqualifierBucket?: string | null;
   hadPendingState?: boolean;
@@ -385,7 +387,7 @@ export interface TurnTrace {
   routeDecision: RouteDecision;
   // Option A observability
   classifierResult?: ClassifierResult;
-  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0C";
+  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0B-research" | "0B-group" | "0C";
   routeReason?: string;
   matchedDisqualifierBucket?: string | null;
   hadPendingState?: boolean;
@@ -430,7 +432,7 @@ export interface TurnTrace {
   // Overall
   totalLatencyMs: number;
   routerContextMs: number;
-  contextPath: "full" | "light" | "memory-light";
+  contextPath: "full" | "light" | "memory-light" | "group";
   pendingActionDebug: PendingActionDebug;
 
   // Full prompt context (for debug dashboard)

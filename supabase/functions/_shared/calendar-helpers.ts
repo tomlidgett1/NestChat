@@ -128,16 +128,33 @@ function getUtcOffsetMs(date: Date, tz: string): number {
 }
 
 export async function fetchCalendarTimezone(accessToken: string): Promise<string> {
+  // Try the settings endpoint first (requires calendar.readonly or calendar.settings.readonly)
   try {
     const resp = await fetchWithTimeout(`${CALENDAR_API}/users/me/settings/timezone`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!resp.ok) return DEFAULT_TZ;
-    const data = await resp.json();
-    return data.value ?? DEFAULT_TZ;
-  } catch {
-    return DEFAULT_TZ;
-  }
+    if (resp.ok) {
+      const data = await resp.json();
+      const tz = data.value;
+      if (tz && tz !== 'UTC') return tz;
+    }
+  } catch { /* fall through */ }
+
+  // Fallback: events list response includes the calendar's timeZone (works with calendar.events scope)
+  try {
+    const now = new Date().toISOString();
+    const resp = await fetchWithTimeout(
+      `${CALENDAR_API}/calendars/primary/events?timeMin=${now}&maxResults=1&singleEvents=true&orderBy=startTime`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    if (resp.ok) {
+      const data = await resp.json();
+      const tz = data.timeZone;
+      if (tz && tz !== 'UTC') return tz;
+    }
+  } catch { /* fall through */ }
+
+  return DEFAULT_TZ;
 }
 
 export async function fetchOutlookTimezone(accessToken: string): Promise<string> {

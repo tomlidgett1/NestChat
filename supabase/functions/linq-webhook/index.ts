@@ -1,6 +1,5 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-import { isAllowedSender, isIgnoredSender } from '../_shared/sendblue.ts';
-import { isMessageReceivedEvent, normaliseLinqMessage, shouldProcessLinqBotNumber, markAsRead, startTyping } from '../_shared/linq.ts';
+import { isAllowedSender, isIgnoredSender, isMessageReceivedEvent, normaliseLinqMessage, shouldProcessLinqBotNumber, markAsRead, startTyping } from '../_shared/linq.ts';
 import { processMessage } from '../_shared/pipeline.ts';
 import type { WebhookEvent } from '../_shared/linq.ts';
 
@@ -53,7 +52,7 @@ Deno.serve(async (req) => {
       return jsonResponse({ received: true }, 200);
     }
 
-    const message = normaliseLinqMessage(event);
+    const message = await normaliseLinqMessage(event);
     if (!message) {
       return jsonResponse({ received: true }, 200);
     }
@@ -67,14 +66,19 @@ Deno.serve(async (req) => {
       chatId: message.chatId,
       from: message.from,
       bot: botNumber,
+      isGroup: message.isGroupChat,
     });
 
+    const bgTasks: Promise<unknown>[] = [
+      markAsRead(message.chatId),
+      processMessage(message),
+    ];
+    if (!message.isGroupChat) {
+      bgTasks.push(startTyping(message.chatId));
+    }
+
     EdgeRuntime.waitUntil(
-      Promise.all([
-        markAsRead(message.chatId),
-        startTyping(message.chatId),
-        processMessage(message),
-      ]).catch((err) => console.error('[linq-webhook] processing failed:', err)),
+      Promise.all(bgTasks).catch((err) => console.error('[linq-webhook] processing failed:', err)),
     );
 
     return jsonResponse({ received: true }, 200);
