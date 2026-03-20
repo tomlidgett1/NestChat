@@ -11,8 +11,22 @@ import { chat, getGroupChatAction, getTextForEffect, generateImage } from './cla
 import { getUserProfile, addMessage } from './state/conversation.js';
 import { debugDashboardHtml } from './debug/dashboard.js';
 import { comparePageHtml } from './debug/compare.js';
+import { automationsDashboardHtml } from './debug/automations.js';
+import { adminPanelHtml } from './debug/admin-panel.js';
+import { activityDashboardHtml } from './debug/activity-dashboard.js';
+import { usersDashboardHtml } from './debug/users-dashboard.js';
+import { retentionDashboardHtml } from './debug/retention-dashboard.js';
+import {
+  handleActivitySummary,
+  handleAdminUsersList,
+  handleAdminUserDetail,
+  handleUserVerificationStats,
+} from './debug/admin-insights-api.js';
+import { handleAdminUserPatch, handleAdminUserDelete } from './debug/admin-user-mutations.js';
+import { handleRetentionMetrics } from './debug/admin-retention-api.js';
 import { handleCompareChat, handleCompareClear, handleCompareGetPrompt, handleCompareUsers, handleCompareUserContext } from './compare/api.js';
 import { handleOnboardNew, handleOnboardChat, handleOnboardState, handleOnboardAgentChat } from './compare/onboard-api.js';
+import { handleAutomationUsers, handleAutomationHistory, handleAutomationUserDetail, handleAutomationTrigger, handleAutomationEligibility } from './automations/api.js';
 
 // Clean up LLM response formatting quirks before sending
 function cleanResponse(text: string): string {
@@ -91,6 +105,12 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Admin shell (sidebar + Compare / Debug / Automations)
+app.get('/admin', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(adminPanelHtml);
+});
+
 // Debug dashboard
 app.get('/debug', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -102,6 +122,35 @@ app.get('/compare', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(comparePageHtml);
 });
+
+// Automation dashboard
+app.get('/automations', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(automationsDashboardHtml);
+});
+
+// Admin activity + user directory (also linked from /admin shell)
+app.get('/activity', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(activityDashboardHtml);
+});
+
+app.get('/users', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(usersDashboardHtml);
+});
+
+app.get('/retention', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(retentionDashboardHtml);
+});
+
+// Automation API endpoints
+app.get('/automations/api/users', handleAutomationUsers);
+app.get('/automations/api/history', handleAutomationHistory);
+app.get('/automations/api/user-detail', handleAutomationUserDetail);
+app.post('/automations/api/trigger', handleAutomationTrigger);
+app.get('/automations/api/eligibility', handleAutomationEligibility);
 
 app.post('/compare/api/chat', handleCompareChat);
 app.post('/compare/api/clear', handleCompareClear);
@@ -127,6 +176,14 @@ app.get('/debug/api/traces', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
+
+app.get('/debug/api/activity-summary', handleActivitySummary);
+app.get('/debug/api/retention-metrics', handleRetentionMetrics);
+app.get('/debug/api/user-verification-stats', handleUserVerificationStats);
+app.get('/debug/api/admin-users', handleAdminUsersList);
+app.get('/debug/api/admin-user-detail', handleAdminUserDetail);
+app.patch('/debug/api/admin-user', handleAdminUserPatch);
+app.delete('/debug/api/admin-user', handleAdminUserDelete);
 
 app.get('/debug/api/trace/:id', async (req, res) => {
   const supabase = getSupabase();
@@ -309,10 +366,15 @@ app.listen(PORT, () => {
 ║  Server running on http://localhost:${PORT}              ║
 ║                                                       ║
 ║  Endpoints:                                           ║
-║    POST /webhook  - Webhook receiver (local dev)      ║
-║    GET  /health   - Health check                      ║
-║    GET  /debug    - Decision tree inspector            ║
-║    GET  /compare  - Model comparison tool              ║
+║    POST /webhook      - Webhook receiver (local dev)  ║
+║    GET  /health       - Health check                  ║
+║    GET  /admin        - Admin panel (all tools)        ║
+║    GET  /debug        - Decision tree inspector        ║
+║    GET  /compare      - Model comparison tool          ║
+║    GET  /automations  - Automation dashboard           ║
+║    GET  /activity     - Activity overview              ║
+║    GET  /users        - User directory + profiles      ║
+║    GET  /retention    - Retention & frequency charts   ║
 ╚═══════════════════════════════════════════════════════╝
   `);
 });

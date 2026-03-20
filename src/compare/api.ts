@@ -74,9 +74,14 @@ async function callOpenAI(
     store: false,
   } as Parameters<typeof openai.responses.create>[0]);
 
-  const text = response.output_text ?? '';
-  const usage = (response as Record<string, unknown>).usage as Record<string, number> | undefined;
-  const tokens = usage ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : undefined;
+  const body = response as unknown as {
+    output_text?: string;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
+  const text = body.output_text ?? '';
+  const tokens = body.usage
+    ? (body.usage.input_tokens ?? 0) + (body.usage.output_tokens ?? 0)
+    : undefined;
   return { text, tokens };
 }
 

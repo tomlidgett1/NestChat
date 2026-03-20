@@ -17,7 +17,7 @@ Nest is someone people text. A friend, companion, advisor, debate partner, joker
 
 This is first-impression mode. You should feel sharp, witty, a bit cheeky, useful, and magnetic straight away. Do not open with intake-style questions.
 
-You are not introduced as a chatbot, bot, product, or tool. If asked what you are, answer briefly and naturally, then move back to helping.
+You are not introduced as a chatbot, bot, product, or tool. If asked who you are: one cheeky line (e.g. smartest contact in their phone). Never "personal assistant" or AI framing, then move back to helping.
 
 Relationship model: trusted operator with a cheeky edge.
 
@@ -154,11 +154,16 @@ interface ColumnState {
   msgCount: number;
 }
 
+/** Matches production iMessage bot so DBG# chats and nest_user rows align. */
+const PRODUCTION_BOT_NUMBER = '+13466215973';
+
 interface OnboardSession {
   handle: string;
   chatId: string;
   onboardingToken: string;
   onboardUrl: string;
+  /** When true, prompt uses simulated onboard_count (net new). When false, real DB state for the selected handle. */
+  simulateNetNew: boolean;
   turnCount: number;
   verificationSent: boolean;
   onboardState: string;
@@ -385,18 +390,34 @@ function extractRememberUserCalls(text: string): { name?: string; fact?: string 
 // Handlers
 // ═══════════════════════════════════════════════════════════════
 
-export async function handleOnboardNew(_req: Request, res: Response) {
+export async function handleOnboardNew(req: Request, res: Response) {
   const supabase = getSupabase();
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 8);
-  const handle = `+test_${ts}_${rand}`;
-  const chatId = `test-chat-${ts}-${rand}`;
   const sessionId = `onboard_${ts}_${rand}`;
 
+  const body = (req.body ?? {}) as { selectedHandle?: string };
+  const selectedRaw = typeof body.selectedHandle === 'string' ? body.selectedHandle.trim() : '';
+  const selectedHandle = selectedRaw.length > 0 ? selectedRaw : null;
+
   try {
+    let handle: string;
+    let chatId: string;
+    let simulateNetNew: boolean;
+
+    if (selectedHandle) {
+      handle = selectedHandle;
+      chatId = `DBG#${PRODUCTION_BOT_NUMBER}#${handle}`;
+      simulateNetNew = false;
+    } else {
+      handle = `+test_${ts}_${rand}`;
+      chatId = `DBG#${PRODUCTION_BOT_NUMBER}#${handle}`;
+      simulateNetNew = true;
+    }
+
     const { data, error } = await supabase.rpc('ensure_nest_user', {
       p_handle: handle,
-      p_bot_number: '+10000000000',
+      p_bot_number: PRODUCTION_BOT_NUMBER,
     });
 
     if (error) {
@@ -417,6 +438,7 @@ export async function handleOnboardNew(_req: Request, res: Response) {
       chatId,
       onboardingToken: token,
       onboardUrl,
+      simulateNetNew,
       turnCount: 0,
       verificationSent: false,
       onboardState: 'new_user_unclassified',
@@ -431,7 +453,9 @@ export async function handleOnboardNew(_req: Request, res: Response) {
 
     sessions.set(sessionId, session);
 
-    console.log(`[onboard-test] Created test user: ${handle}, session: ${sessionId}`);
+    console.log(
+      `[onboard-test] Session ${sessionId}: ${simulateNetNew ? 'net new' : 'selected user'} ${handle}`,
+    );
 
     return res.json({
       sessionId,
@@ -439,6 +463,8 @@ export async function handleOnboardNew(_req: Request, res: Response) {
       chatId,
       onboardingToken: token,
       onboardUrl,
+      userSource: selectedHandle ? 'selected' : 'synthetic',
+      simulateNetNew,
       experimentVariants: session.experimentVariants,
     });
   } catch (err) {
@@ -455,15 +481,34 @@ export async function handleOnboardNew(_req: Request, res: Response) {
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-async function callSupabaseOnboard(message: string, keepHistory: boolean): Promise<Record<string, unknown>> {
+async function callSupabaseOnboard(
+  message: string,
+  keepHistory: boolean,
+  opts: {
+    senderHandle: string;
+    simulateNetNew: boolean;
+    simulatedOnboardCount: number;
+  },
+): Promise<Record<string, unknown>> {
   const url = `${SUPABASE_URL}/functions/v1/debug-dashboard?api=run-single`;
+  const payload: Record<string, unknown> = {
+    message,
+    expectedAgent: 'onboard',
+    keepHistory,
+    forceOnboarding: true,
+    senderHandle: opts.senderHandle,
+    botNumber: PRODUCTION_BOT_NUMBER,
+  };
+  if (opts.simulateNetNew) {
+    payload.simulatedOnboardCount = opts.simulatedOnboardCount;
+  }
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     },
-    body: JSON.stringify({ message, expectedAgent: 'onboard', keepHistory, forceOnboarding: true }),
+    body: JSON.stringify(payload),
   });
   if (!resp.ok) {
     const errBody = await resp.text();
@@ -499,7 +544,11 @@ export async function handleOnboardChat(req: Request, res: Response) {
   try {
     // Route through the production Supabase pipeline
     const keepHistory = session.turnCount > 0; // keep history after first message
-    const result = await callSupabaseOnboard(message, keepHistory);
+    const result = await callSupabaseOnboard(message, keepHistory, {
+      senderHandle: session.handle,
+      simulateNetNew: session.simulateNetNew,
+      simulatedOnboardCount: session.turnCount,
+    });
 
     let responseText = (result.responseText as string) ?? '';
     const tokens = ((result.inputTokens as number) ?? 0) + ((result.outputTokens as number) ?? 0);
@@ -909,7 +958,11 @@ export async function handleOnboardAgentChat(req: Request, res: Response) {
   try {
     // Route through the production Supabase pipeline (same as handleOnboardChat)
     const keepHistory = session.turnCount > 0;
-    const result = await callSupabaseOnboard(message, keepHistory);
+    const result = await callSupabaseOnboard(message, keepHistory, {
+      senderHandle: session.handle,
+      simulateNetNew: session.simulateNetNew,
+      simulatedOnboardCount: session.turnCount,
+    });
 
     const responseText = (result.responseText as string) ?? '';
     const tokens = ((result.inputTokens as number) ?? 0) + ((result.outputTokens as number) ?? 0);

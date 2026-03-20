@@ -1300,7 +1300,7 @@ function renderDecisionTree(t) {
 
   var toolCalls = Array.isArray(t.tool_calls) ? t.tool_calls : [];
   var blockedCalls = Array.isArray(t.tool_calls_blocked) ? t.tool_calls_blocked : [];
-  var routeType = t.route_fast_path ? 'Fast-path (regex)' : 'LLM Router (gpt-5-nano)';
+  var routeType = t.route_fast_path ? 'Fast-path (regex)' : 'LLM Router (gpt-5.4-nano)';
   var confidence = t.route_confidence != null ? (t.route_confidence * 100).toFixed(0) + '%' : '\\u2014';
   var ctxPathVal = t.context_path || 'full';
   var totalTokens = (t.input_tokens || 0) + (t.output_tokens || 0);
@@ -1594,7 +1594,7 @@ function renderDecisionTree(t) {
     + kv('Mode', t.route_mode || '\\u2014')
     + kv('Confidence', confidence + (t.route_confidence < 0.6 && !t.route_fast_path ? ' <span style="color:var(--orange)">(below 0.6 threshold)</span>' : ''))
     + kv('Fast-path Used', t.route_fast_path ? 'Yes (skipped LLM)' : 'No (used LLM classifier)')
-    + kv('Router Latency', routeMs + 'ms' + (t.route_fast_path ? ' (0ms regex + overhead)' : ' (includes gpt-5-nano API call)'))
+    + kv('Router Latency', routeMs + 'ms' + (t.route_fast_path ? ' (0ms regex + overhead)' : ' (includes gpt-5.4-nano API call)'))
     + kv('Confirmation Result', pendingDebug.confirmationResult || 'not_checked')
     + kv('Namespaces (' + (t.route_namespaces || []).length + ')', '<div class="namespaces-list">' + (namespaceTags || '<span style="color:var(--text-secondary)">none</span>') + '</div>')
     + '</div></div></div>'

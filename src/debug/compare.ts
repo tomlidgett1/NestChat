@@ -3,7 +3,7 @@ export const comparePageHtml = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nest — Model Comparison</title>
+<title>Nest · Model Comparison</title>
 <style>
   :root {
     --bg: #0a0a0a;
@@ -445,19 +445,21 @@ export const comparePageHtml = `<!DOCTYPE html>
 </div>
 
 <div class="page-body">
+  <div class="toolbar-row" style="flex-shrink:0; margin-bottom:4px;">
+    <div class="user-selector">
+      <span>User:</span>
+      <select id="userSelect" onchange="onUserChange(this.value)">
+        <option value="">None (net new onboard / anonymous compare)</option>
+      </select>
+      <span class="user-context-badge" id="userContextBadge" style="display:none;"></span>
+    </div>
+  </div>
   <!-- COMPARE MODE -->
   <div id="compare-mode" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
     <div class="toolbar-row">
       <div class="system-prompt-toggle" onclick="toggleSystemPrompt()">
         <span class="chevron" id="sysChevron">&#9654;</span>
         <span>System prompt</span>
-      </div>
-      <div class="user-selector">
-        <span>User:</span>
-        <select id="userSelect" onchange="onUserChange(this.value)">
-          <option value="">None (anonymous)</option>
-        </select>
-        <span class="user-context-badge" id="userContextBadge" style="display:none;"></span>
       </div>
     </div>
     <div class="system-prompt-area" id="sysPromptArea">
@@ -495,6 +497,7 @@ export const comparePageHtml = `<!DOCTYPE html>
         <div class="state-section">
           <div class="state-section-title">Session</div>
           <div class="state-row"><span class="state-label">Status</span><span class="state-badge pending" id="state-status">No session</span></div>
+          <div class="state-row"><span class="state-label">As</span><span class="state-value" id="state-userSource">-</span></div>
           <div class="state-row"><span class="state-label">Handle</span><span class="state-value" id="state-handle">-</span></div>
           <div class="state-row"><span class="state-label">Session ID</span><span class="state-value" id="state-sessionId">-</span></div>
         </div>
@@ -550,7 +553,7 @@ export const comparePageHtml = `<!DOCTYPE html>
 <script>
 const MAX_PHONES = 3;
 const ALL_MODELS = {
-  openai: ['gpt-4.1-mini','gpt-4.1','gpt-4.1-nano','gpt-4o','gpt-4o-mini','gpt-5-nano','gpt-5.2','gpt-5.4','o3-mini','o4-mini'],
+  openai: ['gpt-4.1-mini','gpt-4.1','gpt-4.1-nano','gpt-4o','gpt-4o-mini','gpt-5.4-nano','gpt-5.4-mini','gpt-5.2','gpt-5.4','o3-mini','o4-mini'],
   gemini: ['gemini-3.1-flash-lite-preview','gemini-2.5-flash','gemini-2.5-pro','gemini-2.0-flash','gemini-2.5-flash-lite','gemini-flash-lite-latest','gemini-2.0-flash-lite','gemini-1.5-pro','gemini-1.5-flash'],
   anthropic: ['claude-sonnet-4-20250514','claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-3-haiku-20240307','claude-opus-4-20250514'],
   production: ['Full Pipeline (Agent + Tools)'],
@@ -1229,7 +1232,12 @@ DEFAULT_ONBOARD_COLUMNS.forEach(c => addOnboardColumn(c.provider, c.model));
 
 async function startOnboardSession() {
   try {
-    const resp = await fetch('/compare/api/onboard/new', { method: 'POST' });
+    const selectedHandle = (document.getElementById('userSelect').value || '').trim();
+    const resp = await fetch('/compare/api/onboard/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(selectedHandle ? { selectedHandle } : {}),
+    });
     const data = await resp.json();
     if (data.error) { alert('Failed: ' + data.error); return; }
     onboardSessionId = data.sessionId;
@@ -1244,6 +1252,9 @@ async function startOnboardSession() {
     });
 
     document.getElementById('state-status').textContent = 'Active'; document.getElementById('state-status').className = 'state-badge active';
+    document.getElementById('state-userSource').textContent = data.simulateNetNew
+      ? 'Net new (synthetic handle)'
+      : 'Selected profile (real DB state)';
     document.getElementById('state-handle').textContent = data.handle;
     document.getElementById('state-sessionId').textContent = data.sessionId.slice(0, 20);
     document.getElementById('state-turn').textContent = '0';

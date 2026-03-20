@@ -25,15 +25,30 @@ interface TestResult {
   tools?: string[];
 }
 
-async function callOnboard(message: string, keepHistory = false): Promise<Record<string, unknown>> {
+async function callOnboard(
+  message: string,
+  keepHistory = false,
+  simulatedOnboardCount?: number,
+): Promise<Record<string, unknown>> {
+  const count =
+    simulatedOnboardCount !== undefined
+      ? simulatedOnboardCount
+      : (keepHistory ? undefined : 0);
   const url = `${SUPABASE_URL}/functions/v1/debug-dashboard?api=run-single`;
+  const body: Record<string, unknown> = {
+    message,
+    expectedAgent: 'onboard',
+    keepHistory,
+    forceOnboarding: true,
+  };
+  if (typeof count === 'number') body.simulatedOnboardCount = count;
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     },
-    body: JSON.stringify({ message, expectedAgent: 'onboard', keepHistory, forceOnboarding: true }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     throw new Error(`API call failed (${resp.status}): ${await resp.text()}`);
@@ -136,7 +151,7 @@ async function testQuestionCadence() {
 
   for (let i = 0; i < conversation.length; i++) {
     try {
-      const result = await callOnboard(conversation[i], true);
+      const result = await callOnboard(conversation[i], true, i);
       const text = (result.responseText as string) ?? '';
       const questions = countQuestions(text);
       turnQuestions.push(questions);

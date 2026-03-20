@@ -362,7 +362,13 @@ async function mapsRetryFetch(url: string, init?: RequestInit, timeoutMs = MAPS_
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function parseTransitRoutesV2(routes: any[], origin: string, destination: string): unknown {
+function parseTransitRoutesV2(
+  routes: any[],
+  origin: string,
+  destination: string,
+  _arrivalTime?: string,
+  _departureTime?: string,
+): unknown {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const options = routes.slice(0, 3).map((route: any, idx: number) => {
     const leg = route.legs?.[0];
@@ -459,7 +465,11 @@ async function executeTravelTime(input: Record<string, unknown>): Promise<string
     if (data.error) return JSON.stringify({ error: data.error.message, fallback_query: `${origin} to ${destination} by ${mode}` });
     if (!data.routes?.length) return JSON.stringify({ error: `No ${mode} routes found.`, fallback_query: `${origin} to ${destination} by ${mode}` });
 
-    if (isTransit) return JSON.stringify(parseTransitRoutesV2(data.routes, origin, destination));
+    if (isTransit) {
+      return JSON.stringify(
+        parseTransitRoutesV2(data.routes, origin, destination, arrivalTime, departureTime),
+      );
+    }
 
     // Non-transit: simple response
     const route = data.routes[0];
