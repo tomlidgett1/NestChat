@@ -159,6 +159,33 @@ export interface UserProfile {
   lastSeen: number;
   deepProfileSnapshot: Record<string, unknown> | null;
   deepProfileBuiltAt: string | null;
+  contextProfile?: UserContextProfile | null;
+  testRouteLlm: boolean;
+}
+
+export type UserContextLocationPrecision =
+  | 'unknown'
+  | 'country'
+  | 'state'
+  | 'city'
+  | 'suburb'
+  | 'address';
+
+export interface UserContextLocation {
+  value: string;
+  precision: UserContextLocationPrecision;
+  updatedAt: string;
+  expiresAt?: string | null;
+  source: 'explicit_user' | 'manual' | 'inferred';
+}
+
+export interface UserContextProfile {
+  homeLocation?: UserContextLocation | null;
+  currentLocation?: UserContextLocation | null;
+  workLocation?: UserContextLocation | null;
+  timezone?: string | null;
+  dietaryPreferences?: string[];
+  updatedAt?: string;
 }
 
 export interface ConnectedAccount {
@@ -204,10 +231,53 @@ interface UserProfileRow {
   last_seen: number;
   deep_profile_snapshot: Record<string, unknown> | null;
   deep_profile_built_at: string | null;
+  context_profile: unknown;
+  test_route_llm: boolean;
 }
 
 function sanitiseFacts(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function sanitiseLocationEntry(value: unknown): UserContextLocation | null {
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.value !== 'string' || row.value.trim().length === 0) return null;
+
+  const precision = typeof row.precision === 'string'
+    ? row.precision as UserContextLocationPrecision
+    : 'unknown';
+  const updatedAt = typeof row.updatedAt === 'string' && row.updatedAt.trim().length > 0
+    ? row.updatedAt
+    : new Date(0).toISOString();
+  const source = typeof row.source === 'string'
+    ? row.source as UserContextLocation['source']
+    : 'inferred';
+
+  return {
+    value: row.value.trim(),
+    precision,
+    updatedAt,
+    expiresAt: typeof row.expiresAt === 'string' ? row.expiresAt : null,
+    source,
+  };
+}
+
+export function sanitiseUserContextProfile(value: unknown): UserContextProfile | null {
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Record<string, unknown>;
+  const dietaryPreferences = Array.isArray(row.dietaryPreferences)
+    ? row.dietaryPreferences.filter((item): item is string => typeof item === 'string')
+    : [];
+
+  return {
+    homeLocation: sanitiseLocationEntry(row.homeLocation),
+    currentLocation: sanitiseLocationEntry(row.currentLocation),
+    workLocation: sanitiseLocationEntry(row.workLocation),
+    timezone: typeof row.timezone === 'string' ? row.timezone : null,
+    dietaryPreferences,
+    updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : undefined,
+  };
 }
 
 export async function enqueueWebhookEvent(rawPayload: Record<string, unknown>, message: NormalisedIncomingMessage): Promise<{ eventId: number; created: boolean }> {
@@ -424,7 +494,7 @@ export async function getUserProfile(handle: string): Promise<UserProfile | null
   const supabase = getAdminClient();
   const { data, error } = await supabase
     .from(USER_PROFILES_TABLE)
-    .select('handle, name, facts, use_linq, first_seen, last_seen, deep_profile_snapshot, deep_profile_built_at')
+    .select('handle, name, facts, use_linq, first_seen, last_seen, deep_profile_snapshot, deep_profile_built_at, context_profile, test_route_llm')
     .eq('handle', handle)
     .maybeSingle<UserProfileRow>();
 
@@ -446,7 +516,30 @@ export async function getUserProfile(handle: string): Promise<UserProfile | null
     lastSeen: data.last_seen,
     deepProfileSnapshot: data.deep_profile_snapshot ?? null,
     deepProfileBuiltAt: data.deep_profile_built_at ?? null,
+    contextProfile: sanitiseUserContextProfile(data.context_profile),
+    testRouteLlm: data.test_route_llm ?? false,
   };
+}
+
+export async function updateUserContextProfile(
+  handle: string,
+  contextProfile: UserContextProfile | null,
+): Promise<void> {
+  const supabase = getAdminClient();
+  const patch: Record<string, unknown> = {
+    context_profile: contextProfile ?? {},
+  };
+  if (contextProfile?.timezone) {
+    patch.timezone = contextProfile.timezone;
+  }
+  const { error } = await supabase
+    .from(USER_PROFILES_TABLE)
+    .update(patch)
+    .eq('handle', handle);
+
+  if (error) {
+    console.error('[state] Error updating user context profile:', error);
+  }
 }
 
 export async function getConnectedAccounts(authUserId: string): Promise<ConnectedAccount[]> {
@@ -1489,7 +1582,8 @@ export type OnboardingEventType =
   | 'second_capability_used'
   | 'day2_return'
   | 'activated_composite'
-  | 'at_risk_48h';
+  | 'at_risk_48h'
+  | 'calendar_timezone_change_notified';
 
 export interface EmitEventParams {
   handle: string;

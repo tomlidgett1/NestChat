@@ -1,21 +1,16 @@
 // Edge function: embed-user-content
 // Accepts user-uploaded text, PDF text, or images,
-// embeds via Gemini embedding-2-preview, and stores in pgvector.
+// embeds via OpenAI text-embedding-3-large, and stores in pgvector.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { sentenceAwareChunks } from "../_shared/chunker.ts";
-import {
-  batchEmbedTexts,
-  embedImage,
-  embedPdfPages,
-  vectorString,
-} from "../_shared/gemini-embedder.ts";
+import { getBatchEmbeddings, vectorString } from "../_shared/rag-tools.ts";
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-const serviceRoleKey =
-  Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
+const adminKey =
+  Deno.env.get("SUPABASE_SECRET_KEY") ??
+  Deno.env.get("NEW_SUPABASE_SECRET_KEY") ??
   "";
 
 const MAX_TEXT_BYTES = 100_000; // 100 KB
@@ -66,7 +61,7 @@ Deno.serve(async (req) => {
     }
     const token = authHeader.replace("Bearer ", "");
 
-    const supabaseAuth = createClient(supabaseUrl, serviceRoleKey, {
+    const supabaseAuth = createClient(supabaseUrl, adminKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
@@ -80,7 +75,7 @@ Deno.serve(async (req) => {
     const userId = user.id;
 
     // Admin client for DB operations (bypasses RLS)
-    const supabase = createClient(supabaseUrl, serviceRoleKey, {
+    const supabase = createClient(supabaseUrl, adminKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
@@ -170,8 +165,8 @@ Deno.serve(async (req) => {
           return jsonResponse({ error: "No content to embed" }, 400);
         }
 
-        // Batch embed
-        const embeddings = await batchEmbedTexts(limited);
+        // Batch embed via OpenAI
+        const embeddings = await getBatchEmbeddings(limited);
 
         // Insert chunks
         const rows = limited.map((chunkText, i) => ({
@@ -203,29 +198,13 @@ Deno.serve(async (req) => {
           chunkCount = limited.length;
         }
 
-        // Optionally embed raw PDF inline (≤6 pages) for holistic embedding
-        if (type === "pdf" && pdfBase64) {
-          try {
-            const pdfEmbedding = await embedPdfPages(pdfBase64);
-            await supabase.from("user_document_chunks").insert({
-              user_id: userId,
-              upload_id: uploadId,
-              chunk_index: chunkCount,
-              source_type: "pdf_chunk",
-              content_text: `[Full PDF embedding: ${filename}]`,
-              embedding: vectorString(pdfEmbedding),
-              metadata: { filename, type: "pdf_holistic", pages: "inline" },
-            });
-            chunkCount++;
-          } catch (pdfErr) {
-            console.warn("[embed-user-content] PDF inline embedding failed:", (pdfErr as Error).message);
-            // Non-fatal: text chunks are already stored
-          }
-        }
+        // PDF holistic embedding skipped (OpenAI doesn't support inline PDF embedding).
+        // Text chunks above cover the content.
       } else if (type === "image") {
-        // ── Image: embed directly via multimodal ─────────────
+        // ── Image: embed filename/metadata as text (OpenAI is text-only) ──
         const resolvedMime = mimeType ?? "image/jpeg";
-        const embedding = await embedImage(content, resolvedMime);
+        const descriptionText = `User uploaded image: ${filename} (${resolvedMime})`;
+        const [embedding] = await getBatchEmbeddings([descriptionText]);
 
         const { error: insertErr } = await supabase
           .from("user_document_chunks")
@@ -234,7 +213,7 @@ Deno.serve(async (req) => {
             upload_id: uploadId,
             chunk_index: 0,
             source_type: "image_embedding",
-            content_text: null,
+            content_text: descriptionText,
             embedding: vectorString(embedding),
             metadata: { filename, mimeType: resolvedMime },
           });

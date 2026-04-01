@@ -39,5 +39,57 @@ verify_jwt = false
 [functions.reminder-cron]
 verify_jwt = false
 
+[functions.calendar-timezone-cron]
+verify_jwt = false
+
 [functions.localise-messages]
 verify_jwt = false
+
+[functions.gmail-webhook]
+verify_jwt = false
+
+[functions.outlook-webhook]
+verify_jwt = false
+
+[functions.calendar-webhook]
+verify_jwt = false
+
+[functions.email-webhook-cron]
+verify_jwt = false
+
+[functions.manage-email-webhooks]
+verify_jwt = false
+
+[functions.build-profile]
+verify_jwt = false
+
+[functions.reset]
+verify_jwt = false
+
+[functions.brand-chat]
+verify_jwt = false
+
+[functions.automation-engine]
+verify_jwt = false
+
+[functions.moment-engine]
+verify_jwt = false
+
+[functions.morning-brief-audio]
+verify_jwt = false
+
+[functions.brand-onboard]
+verify_jwt = false
+
+[functions.brand-generate]
+verify_jwt = false
+
+[functions.lightspeed-sync-sales-workorders]
+verify_jwt = false
+
+[functions.lightspeed-inventory-cron]
+verify_jwt = false
+
+[functions.lightspeed-initial-sync]
+verify_jwt = false
+

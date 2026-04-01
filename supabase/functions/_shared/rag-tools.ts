@@ -1,7 +1,10 @@
-// RAG embedding utilities — uses Gemini gemini-embedding-2-preview (3072 dims).
+// RAG embedding utilities — uses OpenAI text-embedding-3-large (3072 dims).
 // Provides LRU-cached embeddings, batch support, and pgvector-compatible string formatting.
 
-import { batchEmbedTexts } from "./gemini-embedder.ts";
+const EMBEDDING_MODEL = "text-embedding-3-large";
+const EMBEDDING_DIMS = 3072;
+const BATCH_MAX = 100;
+const BATCH_DELAY_MS = 100;
 
 // ── Embedding LRU Cache ──────────────────────────────────────
 
@@ -29,13 +32,60 @@ export async function getEmbedding(text: string): Promise<number[]> {
 }
 
 /**
- * Embed multiple texts using Gemini batchEmbedContents.
+ * Embed multiple texts using OpenAI text-embedding-3-large.
+ * Batches into groups of 100 with delay between sub-batches.
  * Returns embeddings in the same order as the input texts.
  */
 export async function getBatchEmbeddings(
   texts: string[],
 ): Promise<number[][]> {
-  return batchEmbedTexts(texts);
+  if (texts.length === 0) return [];
+
+  const { getOpenAIClient } = await import("./ai/models.ts");
+  const client = getOpenAIClient();
+  const results: number[][] = [];
+  let totalPromptTokens = 0;
+
+  for (let i = 0; i < texts.length; i += BATCH_MAX) {
+    const batch = texts.slice(i, i + BATCH_MAX);
+    const t0 = Date.now();
+
+    const response = await client.embeddings.create({
+      model: EMBEDDING_MODEL,
+      input: batch,
+      dimensions: EMBEDDING_DIMS,
+    });
+
+    const batchTokens = (response as unknown as { usage?: { prompt_tokens?: number } }).usage?.prompt_tokens ?? 0;
+    totalPromptTokens += batchTokens;
+
+    const sorted = response.data.sort((a: { index: number }, b: { index: number }) => a.index - b.index);
+    for (const item of sorted) {
+      results.push(item.embedding);
+    }
+
+    // Log embedding batch cost (fire-and-forget)
+    import("./cost-tracker.ts").then(({ logApiCost }) => {
+      import("./supabase.ts").then(({ getAdminClient }) => {
+        logApiCost(getAdminClient(), {
+          userId: null,
+          model: EMBEDDING_MODEL,
+          endpoint: "embeddings",
+          description: `Embedding batch (${batch.length} texts)`,
+          tokensIn: batchTokens,
+          tokensOut: 0,
+          latencyMs: Date.now() - t0,
+          metadata: { batch_size: batch.length, batch_offset: i },
+        });
+      });
+    }).catch(() => {});
+
+    if (i + BATCH_MAX < texts.length) {
+      await new Promise((r) => setTimeout(r, BATCH_DELAY_MS));
+    }
+  }
+
+  return results;
 }
 
 /**

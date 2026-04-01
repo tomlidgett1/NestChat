@@ -1,6 +1,14 @@
 import type { Request, Response } from 'express';
 import { getSupabase } from '../lib/supabase.js';
+import {
+  extractInterestsFromDeepProfile,
+  inferCountryFromTimezone,
+  resolveLocationFromProfile,
+  runNewsSearchForBriefing,
+} from '../lib/news-briefing-standalone.js';
 import OpenAI from 'openai';
+import { cleanResponse } from '../lib/imessage-text-format.js';
+import { displayNameForAlerts, resolveNameForAlerts } from '../lib/resolve-user-display-name.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -364,9 +372,18 @@ async function generateContextualMessage(
   automationType: string,
   profile: Record<string, unknown>,
 ): Promise<{ message: string; metadata: Record<string, unknown> } | null> {
-  const name = profile.name ? String(profile.name).split(' ')[0] : '';
   const handle = profile.handle as string;
   const authUserId = profile.auth_user_id as string | null;
+  const supabase = getSupabase();
+  const greetingRaw = String(
+    (profile.display_name as string | undefined) ?? (profile.name as string | undefined) ?? '',
+  ).trim();
+  let name = greetingRaw
+    ? displayNameForAlerts(greetingRaw.split(/\s+/)[0] || greetingRaw)
+    : '';
+  if (!name && authUserId) {
+    name = await resolveNameForAlerts(supabase, authUserId, greetingRaw || null);
+  }
   const tz = (profile.timezone as string) || 'Australia/Sydney';
   const botNumber = profile.bot_number as string;
   const capabilities = (profile.capability_categories_used as string[]) || [];
@@ -670,6 +687,96 @@ Rules:
       };
     }
 
+    case 'news_briefing': {
+      const tz = (profile.timezone as string) || 'Australia/Sydney';
+      const deepProfile = profile.deep_profile_snapshot as Record<string, unknown> | null;
+      const contextProfile = profile.context_profile;
+      const location = resolveLocationFromProfile(contextProfile, tz);
+      const country = inferCountryFromTimezone(tz);
+      const interests = extractInterestsFromDeepProfile(deepProfile);
+      const topicsStr = interests.length > 0 ? interests.slice(0, 4).join(', ') : undefined;
+
+      let newsBlock = '';
+      try {
+        newsBlock = await runNewsSearchForBriefing({
+          location,
+          country,
+          topics: topicsStr,
+          timezone: tz,
+        });
+      } catch (e) {
+        console.error('[automations-api] news_briefing grounded search failed:', (e as Error).message);
+      }
+
+      const displayName = name || '';
+
+      if (!newsBlock || newsBlock.length < 40) {
+        return {
+          message: displayName
+            ? `Hey ${displayName}, I couldn't pull a fresh news snapshot just then - want me to try again in a bit?`
+            : `Hey, I couldn't pull a fresh news snapshot just then - want me to try again in a bit?`,
+          metadata: { trigger: 'manual', type: 'news_briefing', fallback: true },
+        };
+      }
+
+      const dayContext = new Date().toLocaleString('en-AU', {
+        timeZone: tz,
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+      });
+
+      const instructions = `You are Nest, sending a scheduled news briefing via iMessage.
+
+The user turned on "News Briefing" on the website. Your job is to feel like a smart friend texting them — not a newsreader or a wire service.
+
+RAW NEWS MATERIAL (from live search — may include section headers):
+${newsBlock}
+
+USER CONTEXT:
+- Name for greeting (from their Nest profile): ${displayName || '(none on file — open warmly without a fake name or the word "there")'}.
+- Their rough area for context: ${location ?? 'not specified'} (${country}).
+- Day for them: ${dayContext}
+
+OPENING LINE (CRITICAL):
+- Start with ONE short, warm line that varies in tone — never the same template every time.
+- When you have a name: use their name naturally, e.g. "Hey Tom, here's a quick look…" or "Morning Sarah -". Never say "Hey there".
+- When you do not have a name: warm opener with no placeholder name, e.g. "Hey, quick news catch-up for you -".
+- Do NOT sound robotic or like a push notification. Light personality is good.
+
+BODY:
+- 2-4 short paragraphs OR use --- between 2 bubbles max (iMessage style).
+- Lead with what matters most for someone in ${country}${location ? ` (${location})` : ''}.
+- Cover several distinct stories from the material — mix local angle when relevant with national/world.
+- For each story: bold the headline idea with **like this**, then 1-2 sentences. No bullet lists with asterisk lines — prose or bold labels only.
+- If the raw material is thin on one area, say less rather than padding.
+
+FORBIDDEN: em dashes (use hyphen), the word "mate", markdown tables, numbered lists.
+
+Australian spelling. Max ~350 words — stay scannable on a phone.`;
+
+      const message = await callOpenAINewsBriefing(instructions);
+      if (!message || message.length < 30) {
+        return {
+          message: displayName
+            ? `Hey ${displayName}, here's a quick look at what's making headlines - the full digest didn't come through cleanly, but I can try again if you like.`
+            : `Hey, here's a quick look at what's making headlines - the full digest didn't come through cleanly, but I can try again if you like.`,
+          metadata: { trigger: 'manual', type: 'news_briefing', fallback: true, partial: true },
+        };
+      }
+
+      return {
+        message,
+        metadata: {
+          trigger: 'manual',
+          type: 'news_briefing',
+          had_location: !!location,
+          country,
+          had_topic_interests: !!topicsStr,
+        },
+      };
+    }
+
     case 'feature_discovery': {
       const allFeatures = ['reminders', 'email', 'calendar', 'drafting', 'web_search', 'image_generation', 'travel_time', 'places'];
       const unused = allFeatures.filter(f => !capabilities.includes(f));
@@ -729,6 +836,25 @@ async function callOpenAI(prompt: string): Promise<string | null> {
     return text;
   } catch (err) {
     console.error('[automations-api] OpenAI call failed:', (err as Error).message);
+    return null;
+  }
+}
+
+async function callOpenAINewsBriefing(instructions: string): Promise<string | null> {
+  try {
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_NEWS_BRIEFING_MODEL || 'gpt-4.1',
+      instructions,
+      input: 'Write the news briefing message.',
+      max_output_tokens: 900,
+      store: false,
+    } as Parameters<typeof openai.responses.create>[0]);
+
+    const text = (response as unknown as { output_text?: string }).output_text?.trim();
+    if (!text || text.length < 5) return null;
+    return text;
+  } catch (err) {
+    console.error('[automations-api] OpenAI news briefing failed:', (err as Error).message);
     return null;
   }
 }
@@ -1326,6 +1452,12 @@ export async function handleAutomationTrigger(req: Request, res: Response) {
       return res.status(400).json({ error: `Unknown automation type: ${automation_type}` });
     }
 
+    const bubbleParts = result.message.split(/\n---\n|^---$/m).map((b) => b.trim()).filter(Boolean);
+    const outboundParts = bubbleParts.length
+      ? bubbleParts.map((b) => cleanResponse(b))
+      : [cleanResponse(result.message)];
+    const recordedText = outboundParts.join('\n---\n');
+
     const chatId = `DM#${botNumber}#${handle}`;
 
     // 3. Record in automation_runs table
@@ -1333,7 +1465,7 @@ export async function handleAutomationTrigger(req: Request, res: Response) {
       p_handle: handle,
       p_chat_id: chatId,
       p_automation_type: automation_type,
-      p_content: result.message,
+      p_content: recordedText,
       p_metadata: JSON.stringify(result.metadata),
       p_manual_trigger: true,
       p_triggered_by: 'dashboard',
@@ -1353,47 +1485,49 @@ export async function handleAutomationTrigger(req: Request, res: Response) {
       return res.json({
         success: true,
         automation_type,
-        message: result.message,
+        message: recordedText,
         handle,
         warning: 'Recorded but not sent (no LINQ_API_TOKEN)',
       });
     }
 
     try {
-      const sendResp = await fetch(`${linqBase}/chats`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${linqToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: botNumber,
-          to: [handle],
-          message: {
-            parts: [{ type: 'text', value: result.message }],
+      for (const part of outboundParts) {
+        const sendResp = await fetch(`${linqBase}/chats`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${linqToken}`,
+            'Content-Type': 'application/json',
           },
-        }),
-      });
-
-      if (!sendResp.ok) {
-        const errBody = await sendResp.text();
-        console.error('[automations-api] LINQ send failed:', sendResp.status, errBody);
-        return res.json({
-          success: true,
-          automation_type,
-          message: result.message,
-          handle,
-          warning: `Recorded but LINQ failed (${sendResp.status}): ${errBody.slice(0, 200)}`,
+          body: JSON.stringify({
+            from: botNumber,
+            to: [handle],
+            message: {
+              parts: [{ type: 'text', value: part }],
+            },
+          }),
         });
+
+        if (!sendResp.ok) {
+          const errBody = await sendResp.text();
+          console.error('[automations-api] LINQ send failed:', sendResp.status, errBody);
+          return res.json({
+            success: true,
+            automation_type,
+            message: recordedText,
+            handle,
+            warning: `Recorded but LINQ failed (${sendResp.status}): ${errBody.slice(0, 200)}`,
+          });
+        }
       }
 
-      console.log(`[automations-api] Sent ${automation_type} to ${handle}: "${result.message.slice(0, 60)}..."`);
+      console.log(`[automations-api] Sent ${automation_type} to ${handle}: "${recordedText.slice(0, 60)}..."`);
     } catch (sendErr) {
       console.error('[automations-api] LINQ error:', sendErr);
       return res.json({
         success: true,
         automation_type,
-        message: result.message,
+        message: recordedText,
         handle,
         warning: 'Recorded but LINQ threw an error',
       });
@@ -1404,7 +1538,7 @@ export async function handleAutomationTrigger(req: Request, res: Response) {
       await supabase.rpc('append_conversation_message', {
         p_chat_id: chatId,
         p_role: 'assistant',
-        p_content: result.message,
+        p_content: recordedText,
       });
     } catch {
       // Non-fatal
@@ -1413,7 +1547,7 @@ export async function handleAutomationTrigger(req: Request, res: Response) {
     res.json({
       success: true,
       automation_type,
-      message: result.message,
+      message: recordedText,
       handle,
     });
   } catch (err) {

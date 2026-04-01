@@ -32,7 +32,7 @@ Given the user's message, recent conversation context, and pending action state,
 
 ## Mode rules
 - "chat": casual conversation, banter, emotional support, greetings, jokes, life advice, creative writing, general knowledge questions that don't need tools. Uses gemini-3.1-flash-lite-preview (fast, no reasoning).
-- "smart": anything requiring tools, account data, personal context retrieval, multi-step tasks, or domain expertise. This includes ALL location/travel/places queries (restaurants, directions, travel times, transit, "where is", "how long to get to", "best X near Y", etc.) because these need live data from travel.search tools. Use gpt-5.2 (reasoning model).
+- "smart": anything requiring tools, account data, personal context retrieval, multi-step tasks, or domain expertise. This includes ALL location/travel/places queries (restaurants, directions, travel times, transit, "where is", "how long to get to", "best X near Y", etc.) because these need live data from travel.search tools. Use gpt-5.4 (reasoning model).
 
 When in doubt between chat and smart, prefer smart. It's better to over-qualify than to under-serve.
 
@@ -65,7 +65,9 @@ Fine-grained tool requirements. Only include what's actually needed:
 - "memory.read": reading stored memories about the user
 - "memory.write": saving new information about the user
 - "travel.search": finding places (restaurants, cafes, bars, businesses, attractions), getting travel times, directions, transit schedules, walking/cycling/driving times. Use for ANY question about locations, places to eat/drink, "how long to get to X", "best coffee near X", "phone number for X", "is X open", directions, commute times, etc.
+- "weather.search": getting weather information — current conditions, daily forecasts, hourly forecasts, rain probability, temperature, wind, UV index. Use for ANY weather question: "what's the weather", "will it rain", "forecast for the week", "temperature in X", "should I bring an umbrella", "is it going to be hot tomorrow", "when will it stop raining". ALWAYS prefer weather.search over web.search for weather queries.
 - "reminders.manage": creating, listing, editing, or deleting reminders. Use when the user says "remind me", "set a reminder", "nudge me", "what reminders do I have", "cancel that reminder", or anything about scheduling personal reminders/nudges.
+- "notifications.watch": creating, listing, or deleting email/calendar notification watches. Use when the user asks to be notified about specific emails or calendar events, e.g. "let me know when Tom emails me", "notify me about overdue invoices", "alert me if a meeting gets cancelled", "tell me when I get a refund email", "watch for emails from Daniel after 6pm", "what notification watches do I have?", "remove the Tom email alert".
 - "deep_profile": ONLY for comprehensive self-knowledge requests like "what do you know about me?", "tell me about myself", "tell me something interesting about me", "give me a summary of everything you know about me", "surprise me with what you know". This triggers an exhaustive multi-source search. Do NOT use for simple recall like "what's my name?" or "where do I work?" — those are just memory.read.
 
 ## memoryDepth
@@ -83,8 +85,14 @@ Set to true ONLY when the task is execution-blocked without external retrieval:
 - "How long to drive to the airport?" -> true (needs travel.search for live travel time)
 - "Any restaurants open near me?" -> true (needs travel.search for live place data)
 - "Next train from Flinders St to Caulfield?" -> true (needs travel.search for live transit)
+- "What's the weather like?" -> true (needs weather.search for live weather data)
+- "Will it rain tomorrow?" -> true (needs weather.search for forecast)
+- "Temperature in Sydney?" -> true (needs weather.search for current conditions)
 - "Remind me to call Sarah tomorrow at 3pm" -> true (needs manage_reminder)
 - "What reminders do I have?" -> true (needs manage_reminder)
+- "Let me know when Tom emails me" -> true (needs notifications.watch)
+- "Alert me if a meeting gets cancelled" -> true (needs notifications.watch)
+- "What notification watches do I have?" -> true (needs notifications.watch)
 - "How should I think about calendar hygiene?" -> false (can answer from knowledge)
 - "Tell me about the history of Japan" -> false (general knowledge, web search is optional enrichment)
 
@@ -133,7 +141,7 @@ function buildClassifierInput(
   }
 
   const TOOL_TAG_RE =
-    /\[(email_read|email_draft|email_send|calendar_read|calendar_write|contacts_read|travel_time|places_search|semantic_search|granola_read|web_search)\]/;
+    /\[(email_read|email_draft|email_send|calendar_read|calendar_write|contacts_read|travel_time|places_search|semantic_search|granola_read|web_search|weather_lookup)\]/;
   const toolsInRecentTurns = context.recentTurns
     .filter((t) => t.role === "assistant")
     .slice(-3)
@@ -316,7 +324,9 @@ const VALID_CAPABILITIES: Set<string> = new Set([
   "memory.read",
   "memory.write",
   "travel.search",
+  "weather.search",
   "reminders.manage",
+  "notifications.watch",
   "deep_profile",
 ]);
 

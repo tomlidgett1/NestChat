@@ -3,7 +3,7 @@ import type { ToolContract } from './types.ts';
 export const rememberUserTool: ToolContract = {
   name: 'remember_user',
   description:
-    "Save or update information about someone in Nest's memory. Use this when you learn genuinely NEW information about the user (name, location, job, preferences, interests, relationships, etc.) or when someone CORRECTS previously saved information (e.g. 'actually I live in Sydney not Melbourne'). Do NOT re-save information that is already in the context — check the memory items provided before calling this tool. You MUST also write a text response alongside this tool call. Include a semantic category when possible to help organise memories. This tool persists data permanently until the user deletes it.",
+    "Save or update information about someone in Nest's memory. Use this when you learn genuinely NEW information about the user (name, location, job, preferences, interests, relationships, etc.) or when someone CORRECTS previously saved information (e.g. 'actually I live in Sydney not Melbourne'). For location facts, prefer precise phrasing like 'Lives in Melbourne', 'Currently in London this week', or 'Often works from Southbank' so Nest can tell home, current, and frequent locations apart. Do NOT re-save information that is already in the context — check the memory items provided before calling this tool. You MUST also write a text response alongside this tool call. Include a semantic category when possible to help organise memories. This tool persists data permanently until the user deletes it.",
   namespace: 'memory.write',
   sideEffect: 'commit',
   idempotent: false,
@@ -32,6 +32,8 @@ export const rememberUserTool: ToolContract = {
   },
   inputExamples: [
     { fact: 'Lives in Melbourne, Australia', category: 'location' },
+    { fact: 'Currently in London this week', category: 'location' },
+    { fact: 'Often works from Southbank', category: 'location' },
     { name: 'Sarah', fact: 'Works at Google as a product manager', category: 'employment' },
     { fact: 'Allergic to shellfish', category: 'health' },
     { handle: '+61400000000', name: 'Tom', fact: 'Prefers morning meetings', category: 'preference' },

@@ -4,7 +4,10 @@ import { GoogleGenAI } from '@google/genai';
 import type { Request, Response } from 'express';
 
 // Nest's actual prompt layers for chat mode
-import { CORE_IDENTITY_LAYER } from './nest-prompts.js';
+import { getCoreIdentityLayer } from './nest-prompts.js';
+import { selectRelevantMemoryRows, type MemoryRowForRelevance } from './memory-relevance.js';
+import { formatMissingEdgeFunctionMessage } from '../lib/supabase-edge-function-errors.js';
+import { internalEdgeJsonHeaders } from '../lib/internal-edge-auth.js';
 
 const openai = new OpenAI();
 const anthropic = new Anthropic();
@@ -168,31 +171,43 @@ async function callGemini(
 // ═══════════════════════════════════════════════════════════════
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 async function callProduction(
   _model: string,
   prompt: string,
   _systemPrompt: string,
   _history: ConversationMessage[],
+  opts?: {
+    modelOverride?: string;
+    columnId?: string;
+    comparePromptAppend?: string;
+    compareRoutePreset?: string;
+  },
 ): Promise<{ text: string; tokens?: number; meta?: Record<string, unknown> }> {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-    throw new Error('SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured');
+  if (!SUPABASE_URL) {
+    throw new Error('SUPABASE_URL is not configured');
   }
 
   const url = `${SUPABASE_URL}/functions/v1/debug-dashboard?api=run-single`;
+  const body: Record<string, unknown> = { message: prompt, keepHistory: true };
+  if (opts?.modelOverride) body.modelOverride = opts.modelOverride;
+  if (opts?.columnId) body.columnId = opts.columnId;
+  if (opts?.comparePromptAppend?.trim()) body.comparePromptAppend = opts.comparePromptAppend.trim();
+  if (opts?.compareRoutePreset && opts.compareRoutePreset !== 'auto') {
+    body.compareRoutePreset = opts.compareRoutePreset;
+  }
+
   const resp = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-    },
-    body: JSON.stringify({ message: prompt, keepHistory: true }),
+    headers: internalEdgeJsonHeaders(),
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
     const errText = await resp.text();
-    throw new Error(`Production pipeline error (${resp.status}): ${errText}`);
+    throw new Error(
+      formatMissingEdgeFunctionMessage('debug-dashboard', resp.status, errText, 'Production pipeline error'),
+    );
   }
 
   const result = await resp.json() as Record<string, unknown>;
@@ -232,25 +247,85 @@ const CALLERS: Record<
 };
 
 export async function handleCompareChat(req: Request, res: Response) {
-  const { prompt, systemPrompt, provider, model, sessionId, columnId } = req.body as {
+  const {
+    prompt,
+    systemPrompt,
+    provider,
+    model,
+    sessionId,
+    columnId,
+    comparePromptAppend,
+    compareRoutePreset,
+    columnSystemAppend,
+  } = req.body as {
     prompt?: string;
     systemPrompt?: string;
     provider?: string;
     model?: string;
     sessionId?: string;
     columnId?: string;
+    comparePromptAppend?: string;
+    compareRoutePreset?: string;
+    /** Extra fragment for Anthropic direct columns only */
+    columnSystemAppend?: string;
   };
 
   if (!prompt || !provider || !model || !sessionId) {
     return res.status(400).json({ error: 'Missing prompt, provider, model, or sessionId' });
   }
 
+  const historyKey = columnId || provider;
+
+  // OpenAI and Gemini models run through the full production pipeline with model override.
+  // Anthropic models use direct API calls (no agent loop support yet).
+  // Production uses the pipeline with default models.
+  const useFullPipeline = provider === 'production' || provider === 'openai' || provider === 'gemini';
+
+  if (useFullPipeline) {
+    const modelOverride = provider === 'production' ? undefined : model;
+    const preset =
+      compareRoutePreset === 'casual_lane' || compareRoutePreset === 'full_compose'
+        ? compareRoutePreset
+        : undefined;
+    const start = Date.now();
+    try {
+      const result = await callProduction(model, prompt, '', [], {
+        modelOverride,
+        columnId: historyKey,
+        comparePromptAppend: comparePromptAppend ?? undefined,
+        compareRoutePreset: preset,
+      });
+      const latencyMs = Date.now() - start;
+
+      console.log(`[compare] pipeline/${modelOverride || 'default'} (col:${historyKey}): ${latencyMs}ms, ${result.tokens ?? '?'} tokens`);
+
+      return res.json({
+        text: result.text,
+        latencyMs,
+        tokens: result.tokens,
+        provider,
+        model,
+        columnId: historyKey,
+        production: result.meta || null,
+      });
+    } catch (err) {
+      const latencyMs = Date.now() - start;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[compare] pipeline/${modelOverride || 'default'} error (${latencyMs}ms):`, message);
+      return res.status(500).json({ error: message });
+    }
+  }
+
+  // Fallback: direct API call for providers without agent loop support (anthropic)
   if (!CALLERS[provider as Provider]) {
     return res.status(400).json({ error: `Unknown provider: ${provider}` });
   }
 
-  const historyKey = columnId || provider;
-  const effectiveSystemPrompt = systemPrompt || CORE_IDENTITY_LAYER;
+  const append = columnSystemAppend?.trim();
+  const effectiveSystemPrompt =
+    append && append.length > 0
+      ? `${systemPrompt || getCoreIdentityLayer()}\n\n--- Column-specific testing ---\n${append}`
+      : systemPrompt || getCoreIdentityLayer();
   const history = getHistory(sessionId, historyKey);
 
   const start = Date.now();
@@ -274,8 +349,7 @@ export async function handleCompareChat(req: Request, res: Response) {
       model,
       columnId: historyKey,
       historyLength: history.length + 2,
-      // Production pipeline metadata (agent, tools, routing info)
-      ...(result as { meta?: Record<string, unknown> }).meta ? { production: (result as { meta?: Record<string, unknown> }).meta } : {},
+      directCall: true,
     });
   } catch (err) {
     const latencyMs = Date.now() - start;
@@ -286,32 +360,29 @@ export async function handleCompareChat(req: Request, res: Response) {
 }
 
 export async function handleCompareClear(req: Request, res: Response) {
-  const { sessionId } = req.body as { sessionId?: string };
+  const { sessionId, columnIds } = req.body as { sessionId?: string; columnIds?: string[] };
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
   clearConversation(sessionId);
 
-  // Also clear the production-side DBG# conversation history
-  if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
+  // Clear production-side DBG# conversation history for all columns
+  if (SUPABASE_URL) {
     try {
       await fetch(`${SUPABASE_URL}/functions/v1/debug-dashboard?api=clear-history`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-        },
-        body: '{}',
+        headers: internalEdgeJsonHeaders(),
+        body: JSON.stringify({ columnIds: columnIds || [] }),
       });
     } catch (e) {
       console.warn('[compare] failed to clear production history:', e);
     }
   }
 
-  console.log(`[compare] cleared conversation: ${sessionId}`);
+  console.log(`[compare] cleared conversation: ${sessionId} (${(columnIds || []).length} columns)`);
   return res.json({ ok: true });
 }
 
 export async function handleCompareGetPrompt(_req: Request, res: Response) {
-  return res.json({ systemPrompt: CORE_IDENTITY_LAYER });
+  return res.json({ systemPrompt: getCoreIdentityLayer() });
 }
 
 export async function handleCompareUsers(_req: Request, res: Response) {
@@ -389,13 +460,11 @@ async function loadConnectedAccounts(supabase: any, authUserId: string): Promise
   return accounts;
 }
 
-interface MemoryItemRow {
-  memory_type: string;
-  category: string;
-  value_text: string;
-  confidence: number;
-  last_confirmed_at: string | null;
-}
+/** Row from `get_active_memory_items` (scoring fields in `MemoryRowForRelevance`). */
+interface MemoryItemRow extends MemoryRowForRelevance {}
+
+const MEMORY_RPC_POOL_LIMIT = 50;
+const MEMORY_CONTEXT_LIMIT = 20;
 
 const MEMORY_TYPE_LABELS: Record<string, string> = {
   identity: 'Identity',
@@ -437,6 +506,13 @@ export async function handleCompareUserContext(req: Request, res: Response) {
   const handle = req.query.handle as string;
   if (!handle) return res.status(400).json({ error: 'Missing handle' });
 
+  const userMessage =
+    typeof req.query.message === 'string'
+      ? req.query.message
+      : typeof req.query.userMessage === 'string'
+        ? req.query.userMessage
+        : '';
+
   try {
     const { getSupabase } = await import('../lib/supabase.js');
     const supabase = getSupabase();
@@ -457,12 +533,22 @@ export async function handleCompareUserContext(req: Request, res: Response) {
       accounts = await loadConnectedAccounts(supabase, profile.auth_user_id);
     }
 
-    // Load memory items via RPC (matching production state.ts)
-    let memoryItems: MemoryItemRow[] = [];
-    const memoryRes = await supabase.rpc('get_active_memory_items', { p_handle: handle, p_limit: 30 });
+    // Load memory pool then rank like production `buildContext` → `getRelevantMemoryItems` (pool 50, top 20)
+    let memoryPool: MemoryItemRow[] = [];
+    const memoryRes = await supabase.rpc('get_active_memory_items', {
+      p_handle: handle,
+      p_limit: MEMORY_RPC_POOL_LIMIT,
+    });
     if (!memoryRes.error && memoryRes.data) {
-      memoryItems = memoryRes.data;
+      memoryPool = (memoryRes.data as MemoryItemRow[]).map((row) => ({
+        ...row,
+        normalized_value: row.normalized_value ?? null,
+        last_confirmed_at: row.last_confirmed_at ?? null,
+        status: row.status ?? 'active',
+      }));
     }
+
+    const memoryItems = selectRelevantMemoryRows(memoryPool, userMessage, MEMORY_CONTEXT_LIMIT);
 
     // Build context block exactly like production prompt-layers.ts buildContextLayer()
     const sections: string[] = [];
@@ -521,6 +607,8 @@ export async function handleCompareUserContext(req: Request, res: Response) {
       },
       accounts,
       memoryItems: memoryItems.length,
+      memoryItemsPool: memoryPool.length,
+      contextMemoryLimit: MEMORY_CONTEXT_LIMIT,
       contextBlock: sections.join('\n\n'),
       timezone: tz,
     });

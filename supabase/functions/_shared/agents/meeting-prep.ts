@@ -8,7 +8,7 @@ export const meetingPrepAgent: AgentConfig = {
   modelTier: 'agent',
   maxOutputTokens: 8192,
   toolPolicy: {
-    allowedNamespaces: ['calendar.read', 'email.read', 'email.write', 'contacts.read', 'granola.read', 'knowledge.search', 'memory.read', 'memory.write', 'messaging.react', 'messaging.effect', 'web.search', 'travel.search'],
+    allowedNamespaces: ['calendar.read', 'email.read', 'email.write', 'contacts.read', 'granola.read', 'knowledge.search', 'memory.read', 'memory.write', 'messaging.react', 'messaging.effect', 'web.search', 'travel.search', 'weather.search'],
     blockedNamespaces: ['admin.internal'],
     maxToolRounds: 8,
   },

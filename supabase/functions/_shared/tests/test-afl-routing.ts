@@ -113,7 +113,10 @@ function isWebSearchLookup(msg: string, bucket: string): boolean {
   if (bucket === 'news_current') return true;
   if (bucket === 'location_intent') return true;
   if (bucket === 'lookup_verbs') return true;
-  if (bucket === 'event_time_query') return true;
+  if (bucket === 'event_time_query') {
+    if (/\b(my|our|the)\s+flight\b|\bflight\s+time\b|\bwhen\s+(do|does|am)\s+(i|we)\s+(fly|flying|leave|depart|board)\b|\bwhat\s+time\s+(do|does|am)\s+(i|we)\s+(fly|flying|leave|depart|board)\b|\bbooking ref(?:erence)?\b|\bpnr\b|\be-?ticket\b|\bitinerary\b|\bboarding pass\b|\blounge pass\b|\b(qantas|jetstar|virgin australia|bonza|rex)\b/i.test(msg)) return false;
+    return true;
+  }
   if (bucket === 'sports_live_data') return true;
 
   if (bucket === 'temporal_signals') {
@@ -196,6 +199,18 @@ const tests: Test[] = [
     message: "Collingwood vs Essendon what time",
     description: "team names + what time → event_time_query",
     expectLane: "0B-research",
+    expectBucket: "event_time_query",
+  },
+  {
+    message: "What time is the flight",
+    description: "personal flight follow-up — needs email/calendar, not 0B-research",
+    expectLane: "0C",
+    expectBucket: "event_time_query",
+  },
+  {
+    message: "What time am I flying to Cairns",
+    description: "explicit personal departure question",
+    expectLane: "0C",
     expectBucket: "event_time_query",
   },
   {

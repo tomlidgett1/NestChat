@@ -7,9 +7,13 @@ const corsHeaders = {
 };
 
 function getAdminClient() {
+  const adminKey =
+    Deno.env.get('SUPABASE_SECRET_KEY') ||
+    Deno.env.get('NEW_SUPABASE_SECRET_KEY');
+
   return createClient(
     Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SERVICE_ROLE_KEY')!,
+    adminKey!,
     { auth: { persistSession: false, autoRefreshToken: false } },
   );
 }
@@ -28,14 +32,29 @@ const testRunStore: Record<string, {
 async function runSingleTestCase(
   message: string,
   expectedAgent?: string,
-  opts?: { keepHistory?: boolean; forceOnboarding?: boolean },
+  opts?: {
+    keepHistory?: boolean;
+    forceOnboarding?: boolean;
+    /** When forcing onboarding for admin/compare net-new users, override DB onboard_count for first-message prompts. */
+    simulatedOnboardCount?: number;
+    senderHandle?: string;
+    botNumber?: string;
+    /** Override the model used in the agent loop (for compare page testing) */
+    modelOverride?: string;
+    /** Column ID for per-column conversation isolation in compare page */
+    columnId?: string;
+    comparePromptAppend?: string;
+    compareRoutePreset?: string;
+  },
 ): Promise<Record<string, unknown>> {
   const { handleTurn } = await import('../_shared/orchestrator/handle-turn.ts');
   const { ensureNestUser, clearConversation, cancelPendingEmailSends, getUserTimezone } = await import('../_shared/state.ts');
 
-  const SENDER_HANDLE = '+61414187820';
-  const BOT_NUMBER = '+13466215973';
-  const CHAT_ID = `DBG#${BOT_NUMBER}#${SENDER_HANDLE}`;
+  const SENDER_HANDLE = opts?.senderHandle ?? '+61414187820';
+  const BOT_NUMBER = opts?.botNumber ?? '+13466215973';
+  const CHAT_ID = opts?.columnId
+    ? `DBG#${BOT_NUMBER}#${SENDER_HANDLE}#${opts.columnId}`
+    : `DBG#${BOT_NUMBER}#${SENDER_HANDLE}`;
 
   // Mirror production: ensureNestUser returns NestUser with status, authUserId, etc.
   const nestUser = await ensureNestUser(SENDER_HANDLE, BOT_NUMBER);
@@ -54,8 +73,17 @@ async function runSingleTestCase(
   let onboardingContext: any;
   if (isOnboarding) {
     const onboardUrl = `https://nest.expert/?token=${nestUser.onboardingToken}`;
+    const useSim =
+      opts?.forceOnboarding === true &&
+      typeof opts.simulatedOnboardCount === 'number';
     onboardingContext = {
-      nestUser,
+      nestUser: useSim
+        ? {
+          ...nestUser,
+          onboardCount: opts.simulatedOnboardCount,
+          onboardMessages: [],
+        }
+        : nestUser,
       onboardUrl,
       experimentVariants: {},
     };
@@ -81,6 +109,15 @@ async function runSingleTestCase(
     onboardingContext: isOnboarding ? onboardingContext as any : undefined,
     service: 'imessage',
     timezone: userTimezone,
+    modelOverride: opts?.modelOverride,
+    comparePromptAppend: typeof opts?.comparePromptAppend === 'string' && opts.comparePromptAppend.trim()
+      ? opts.comparePromptAppend.trim()
+      : undefined,
+    compareRoutePreset: (() => {
+      const p = opts?.compareRoutePreset;
+      if (p === 'casual_lane' || p === 'full_compose') return p;
+      return undefined;
+    })(),
   });
   const latencyMs = Date.now() - start;
 
@@ -211,6 +248,27 @@ Deno.serve(async (req) => {
       const result = await runSingleTestCase(body.message, body.expectedAgent, {
         keepHistory: body.keepHistory ?? false,
         forceOnboarding: body.forceOnboarding ?? undefined,
+        simulatedOnboardCount: typeof body.simulatedOnboardCount === 'number'
+          ? body.simulatedOnboardCount
+          : undefined,
+        senderHandle: typeof body.senderHandle === 'string' && body.senderHandle.trim()
+          ? body.senderHandle.trim()
+          : undefined,
+        botNumber: typeof body.botNumber === 'string' && body.botNumber.trim()
+          ? body.botNumber.trim()
+          : undefined,
+        modelOverride: typeof body.modelOverride === 'string' && body.modelOverride.trim()
+          ? body.modelOverride.trim()
+          : undefined,
+        columnId: typeof body.columnId === 'string' && body.columnId.trim()
+          ? body.columnId.trim()
+          : undefined,
+        comparePromptAppend: typeof body.comparePromptAppend === 'string' && body.comparePromptAppend.trim()
+          ? body.comparePromptAppend.trim()
+          : undefined,
+        compareRoutePreset: typeof body.compareRoutePreset === 'string' && body.compareRoutePreset.trim()
+          ? body.compareRoutePreset.trim()
+          : undefined,
       });
       return new Response(JSON.stringify(result), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -227,11 +285,32 @@ Deno.serve(async (req) => {
   if (req.method === 'POST' && url.searchParams.get('api') === 'clear-history') {
     try {
       const { clearConversation, cancelPendingEmailSends } = await import('../_shared/state.ts');
-      const SENDER_HANDLE = '+61414187820';
-      const BOT_NUMBER = '+13466215973';
-      const CHAT_ID = `DBG#${BOT_NUMBER}#${SENDER_HANDLE}`;
-      await clearConversation(CHAT_ID);
-      await cancelPendingEmailSends(CHAT_ID);
+      let body: Record<string, unknown> = {};
+      try {
+        body = await req.json() as Record<string, unknown>;
+      } catch {
+        body = {};
+      }
+      const SENDER_HANDLE =
+        typeof body.senderHandle === 'string' && body.senderHandle.trim()
+          ? body.senderHandle.trim()
+          : '+61414187820';
+      const BOT_NUMBER =
+        typeof body.botNumber === 'string' && body.botNumber.trim()
+          ? body.botNumber.trim()
+          : '+13466215973';
+      const BASE_CHAT_ID = `DBG#${BOT_NUMBER}#${SENDER_HANDLE}`;
+      await clearConversation(BASE_CHAT_ID);
+      await cancelPendingEmailSends(BASE_CHAT_ID);
+      // Clear per-column histories from compare page
+      const columnIds = Array.isArray(body.columnIds) ? body.columnIds as string[] : [];
+      for (const colId of columnIds) {
+        if (typeof colId === 'string' && colId.trim()) {
+          const colChatId = `${BASE_CHAT_ID}#${colId.trim()}`;
+          await clearConversation(colChatId);
+          await cancelPendingEmailSends(colChatId);
+        }
+      }
       return new Response(JSON.stringify({ ok: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });

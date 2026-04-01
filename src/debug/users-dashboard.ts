@@ -213,7 +213,7 @@ export const usersDashboardHtml = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Users</h1>
-  <p class="sub">Search <code>user_profiles</code>, edit allowlisted fields, or permanently delete a handle and related rows. Deleting the Auth user requires a Supabase service role key on this server.</p>
+  <p class="sub">Search <code>user_profiles</code>, edit allowlisted fields, or permanently delete a handle and related rows. Deleting the Auth user requires a Supabase server secret key on this server.</p>
   <div id="verify-summary" class="verify-summary" style="display:none;"></div>
   <div id="err" class="err" style="display:none;"></div>
   <div class="layout">
@@ -768,7 +768,7 @@ export const usersDashboardHtml = `<!DOCTYPE html>
 
         var delSection =
           '<div class="section"><h3>Delete user data</h3>' +
-          '<p class="form-hint">Removes rows for this handle: messages, memory, turns, webhooks, RAG documents, automations, reminders, notification watches, group memberships, and the <code>user_profiles</code> row. Optionally also calls <code>auth.admin.deleteUser</code> (needs service role key on this server).</p>' +
+          '<p class="form-hint">Removes rows for this handle: messages, memory, turns, webhooks, RAG documents, automations, reminders, notification watches, group memberships, and the <code>user_profiles</code> row. Optionally also calls <code>auth.admin.deleteUser</code> (needs a server secret key on this server).</p>' +
           '<label class="chk"><input type="checkbox" id="del-auth" /> Also delete Supabase Auth user (OAuth + uploads cascade)</label>' +
           '<label style="display:block;margin-top:10px;font-size:11px;font-weight:600;color:var(--muted);">Type handle to confirm<br>' +
           '<input type="text" id="del-confirm" class="inp mono" style="max-width:100%" autocomplete="off" placeholder="' + esc(handle) + '" /></label>' +

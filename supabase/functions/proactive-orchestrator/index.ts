@@ -1,7 +1,8 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getProactiveEligibleUsers } from '../_shared/state.ts';
 import { evaluateProactiveAction, executeProactiveAction } from '../_shared/proactive.ts';
-import { sendMessage } from '../_shared/linq.ts';
+import { sendMessage, createChat } from '../_shared/linq.ts';
+import { resolveChatId } from '../_shared/email-webhook-helpers.ts';
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -42,9 +43,12 @@ Deno.serve(async (req) => {
         const result = await executeProactiveAction(user, action);
 
         if (result.sent && result.message && user.botNumber) {
-          const chatId = `DM#${user.botNumber}#${user.handle}`;
-
-          await sendMessage(chatId, result.message);
+          const chatId = await resolveChatId(user.handle);
+          if (chatId) {
+            await sendMessage(chatId, result.message);
+          } else {
+            await createChat(user.botNumber, [user.handle], result.message);
+          }
           sent++;
           console.log(`[proactive] Sent ${action.type} to ${user.handle}`);
         } else if (action.type === 'hold') {

@@ -1,16 +1,16 @@
 export const comparePageHtml = `<!DOCTYPE html>
-<html lang="en">
+<html lang="en-AU">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nest · Model Comparison</title>
 <style>
   :root {
-    --bg: #0a0a0a;
-    --surface: #1a1a1a;
-    --border: rgba(255,255,255,0.08);
-    --text: #f5f5f5;
-    --text-secondary: #888;
+    --bg: #f3f4f6;
+    --surface: #ffffff;
+    --border: #e5e7eb;
+    --text: #111827;
+    --text-secondary: #6b7280;
     --accent: #007AFF;
     --green: #34C759;
     --red: #FF3B30;
@@ -46,48 +46,61 @@ export const comparePageHtml = `<!DOCTYPE html>
 
   .mode-tabs {
     display: flex; align-items: center;
-    background: rgba(255,255,255,0.06); padding: 2px; border-radius: 8px;
+    background: #f3f4f6; padding: 2px; border-radius: 6px;
   }
   .mode-tab {
-    padding: 5px 14px; font-size: 13px; font-weight: 500; border-radius: 6px;
-    border: none; background: transparent; color: var(--text-secondary);
-    cursor: pointer; transition: all 0.15s;
+    padding: 6px 14px; font-size: 13px; font-weight: 500; border-radius: 6px;
+    border: none; background: transparent; color: #6b7280;
+    cursor: pointer; transition: color 0.15s, background 0.15s, box-shadow 0.15s;
   }
-  .mode-tab.active { color: var(--text); background: rgba(255,255,255,0.1); }
-  .mode-tab:not(.active):hover { background: rgba(255,255,255,0.04); }
+  .mode-tab.active { color: #111827; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+  .mode-tab:not(.active):hover { background: rgba(0,0,0,0.04); color: #374151; }
 
   .btn {
-    padding: 6px 14px; font-size: 13px; font-weight: 500; border-radius: 8px;
+    padding: 6px 14px; font-size: 13px; font-weight: 500; border-radius: 6px;
     border: 1px solid var(--border); background: var(--surface); color: var(--text);
     cursor: pointer; transition: all 0.15s; text-decoration: none;
   }
-  .btn:hover { background: rgba(255,255,255,0.08); }
-  .btn-danger { color: var(--red); border-color: rgba(255,59,48,0.3); }
-  .btn-danger:hover { background: rgba(255,59,48,0.1); }
+  .btn:hover { background: #f9fafb; }
+  .btn-danger { color: var(--red); border-color: rgba(255,59,48,0.35); }
+  .btn-danger:hover { background: rgba(255,59,48,0.06); }
 
   .session-badge {
     font-size: 11px; color: var(--text-secondary);
-    background: rgba(255,255,255,0.06); padding: 3px 8px; border-radius: 6px;
+    background: #f3f4f6; padding: 3px 8px; border-radius: 6px;
     font-family: 'SF Mono', 'Menlo', monospace;
   }
 
   /* -- Page body -- */
   .page-body {
     flex: 1; display: flex; flex-direction: column; overflow: hidden;
-    padding: 16px 24px 0;
+    padding: 12px 16px 0;
+    min-height: 0;
+    position: relative;
+  }
+
+  .compare-hidden-fields {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+    pointer-events: none;
+  }
+  .compare-hidden-fields textarea {
+    width: 1px;
+    height: 1px;
+    opacity: 0;
   }
 
   /* -- Toolbar -- */
   .toolbar-row {
-    display: flex; align-items: center; gap: 16px; margin-bottom: 12px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 16px; margin-bottom: 10px; flex-shrink: 0;
   }
-  .system-prompt-toggle {
-    display: flex; align-items: center; gap: 6px; font-size: 12px;
-    color: var(--text-secondary); cursor: pointer; user-select: none;
-  }
-  .system-prompt-toggle:hover { color: var(--text); }
-  .system-prompt-toggle .chevron { transition: transform 0.2s; font-size: 10px; }
-  .system-prompt-toggle .chevron.open { transform: rotate(90deg); }
 
   .user-selector { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
   .user-selector select {
@@ -97,19 +110,85 @@ export const comparePageHtml = `<!DOCTYPE html>
   }
   .user-context-badge {
     font-size: 10px; padding: 2px 6px; border-radius: 6px;
-    background: rgba(52,199,89,0.15); color: #34C759; font-weight: 600;
+    background: #ecfdf5; color: #047857; font-weight: 600;
   }
 
-  .system-prompt-area { display: none; margin-bottom: 10px; flex-shrink: 0; }
-  .system-prompt-area.visible { display: block; }
-  .system-prompt-area textarea {
-    width: 100%; padding: 10px 14px; font-size: 13px; font-family: inherit;
-    border: 1px solid var(--border); border-radius: 8px; resize: vertical;
-    min-height: 80px; max-height: 200px; outline: none;
-    color: var(--text-secondary); background: var(--surface);
+  .btn-sm {
+    padding: 5px 10px; font-size: 11px; font-weight: 500; border-radius: 6px;
+    border: 1px solid var(--border); background: #fff; color: var(--text); cursor: pointer;
   }
-  .system-prompt-area textarea:focus { border-color: var(--accent); color: var(--text); }
-  .system-prompt-info { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+  .btn-sm:hover { background: #f9fafb; }
+  .btn-sm:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .phone-prompt-field-label {
+    display: block;
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+  }
+  .phone-prompt-preset-select {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+  .phone-prompt-dialog {
+    max-width: min(96vw, 720px);
+    width: 100%;
+    max-height: min(92vh, 880px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: refinePopIn 0.3s ease-out;
+  }
+  .phone-prompt-textarea {
+    width: 100%;
+    flex: 1;
+    min-height: min(48vh, 420px);
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.5;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    resize: vertical;
+    color: var(--text);
+    background: #fff;
+    outline: none;
+  }
+  .phone-prompt-textarea:focus { border-color: var(--accent); }
+
+  .refine-backdrop {
+    position: fixed; inset: 0; z-index: 300; display: none; align-items: center; justify-content: center;
+    padding: 16px; background: rgba(0,0,0,0.4);
+    animation: refineFadeIn 0.2s ease-out;
+  }
+  .refine-backdrop.open { display: flex; }
+  @keyframes refineFadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes refinePopIn {
+    from { opacity: 0; transform: translateY(8px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .refine-dialog {
+    width: 100%; max-width: 480px; background: #fff; border: 1px solid var(--border); border-radius: 6px;
+    padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.12);
+    animation: refinePopIn 0.3s ease-out;
+  }
+  .refine-dialog h3 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+  .refine-dialog .refine-sub { font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; }
+  .refine-dialog label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 6px; color: #374151; }
+  .refine-dialog textarea {
+    width: 100%; min-height: 88px; padding: 10px 12px; font-size: 13px; border: 1px solid var(--border);
+    border-radius: 6px; font-family: inherit; resize: vertical; margin-bottom: 14px;
+  }
+  .refine-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+  .phone-prompt-backdrop { z-index: 350; }
 
   /* -- Main content area with optional detail panel -- */
   .content-with-panel {
@@ -119,38 +198,62 @@ export const comparePageHtml = `<!DOCTYPE html>
     flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0;
   }
 
-  /* -- iPhone columns -- */
+  /* -- Comparison columns: grid shares full width (no empty right gutter) -- */
   .phones-container {
-    flex: 1; display: flex; gap: 20px; overflow: hidden; min-height: 0;
-    justify-content: center; align-items: stretch; padding-bottom: 8px;
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    align-items: stretch;
+    justify-items: stretch;
+    gap: 16px 20px;
+    overflow: auto;
+    padding: 8px 12px 16px 4px;
+    -webkit-overflow-scrolling: touch;
   }
 
   .phone-wrapper {
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+    width: 100%;
     min-width: 0;
+    position: relative;
   }
 
   /* Provider/model selectors above phone */
   .phone-selectors {
-    display: flex; gap: 6px; align-items: center; flex-shrink: 0;
+    display: flex; gap: 8px; align-items: center; flex-shrink: 0; flex-wrap: wrap;
+    width: 100%;
   }
   .phone-selectors select {
-    padding: 4px 8px; font-size: 11px; font-family: inherit;
-    border: 1px solid var(--border); border-radius: 6px;
-    background: var(--surface); color: var(--text); outline: none; cursor: pointer;
+    flex: 1 1 auto;
+    min-width: 120px;
+    max-width: 100%;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+    outline: none;
+    cursor: pointer;
   }
   .phone-selectors select:disabled { opacity: 0.4; }
   .phone-remove {
-    width: 20px; height: 20px; border: none; background: none;
+    width: 20px; height: 20px; flex-shrink: 0; border: none; background: none;
     color: var(--text-secondary); cursor: pointer; font-size: 14px;
     display: flex; align-items: center; justify-content: center;
     border-radius: 6px; transition: all 0.15s;
   }
   .phone-remove:hover { background: rgba(255,59,48,0.15); color: var(--red); }
 
-  /* iPhone frame */
+  /* iPhone frame (centred in column; column can be wider than the device) */
   .iphone-frame {
-    width: 320px; flex: 1; min-height: 0;
+    width: 100%;
+    max-width: 360px;
+    margin-left: auto;
+    margin-right: auto;
+    flex: 1 1 auto;
+    min-height: min(420px, 52vh);
     background: #000; border-radius: 44px;
     border: 3px solid #333;
     display: flex; flex-direction: column; overflow: hidden;
@@ -229,7 +332,7 @@ export const comparePageHtml = `<!DOCTYPE html>
     display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; padding: 0 4px;
     font-size: 10px; color: #999;
   }
-  .msg-meta .val { font-weight: 600; color: #bbb; }
+  .msg-meta .val { font-weight: 600; color: #6b7280; }
 
   /* Typing indicator */
   .typing-row { display: flex; align-items: flex-end; gap: 4px; margin-bottom: 4px; }
@@ -250,6 +353,29 @@ export const comparePageHtml = `<!DOCTYPE html>
     flex-shrink: 0; background: #F2F2F7; border-top: 0.5px solid rgba(0,0,0,0.12);
     padding: 8px 12px 26px; display: flex; align-items: center; gap: 8px;
   }
+  .imessage-input-bar.imessage-prompt-bar {
+    padding: 10px 12px 22px;
+    justify-content: center;
+  }
+  .btn-phone-prompt {
+    width: 100%;
+    max-width: 280px;
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn-phone-prompt:hover {
+    background: #f9fafb;
+    border-color: #d1d5db;
+  }
   .imessage-fake-input {
     flex: 1; background: #fff; border: 0.5px solid rgba(0,0,0,0.12);
     border-radius: 20px; padding: 8px 14px; font-size: 14px; color: #C7C7CC;
@@ -263,12 +389,19 @@ export const comparePageHtml = `<!DOCTYPE html>
 
   /* Add phone button */
   .add-phone-btn {
-    width: 60px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
-    border: 1px dashed var(--border); border-radius: 44px;
-    cursor: pointer; color: var(--text-secondary); font-size: 24px;
-    transition: all 0.15s; min-height: 400px; align-self: center;
+    width: 100%;
+    max-width: 56px;
+    justify-self: center;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px dashed #d1d5db; border-radius: 44px;
+    cursor: pointer; color: var(--text-secondary); font-size: 22px;
+    transition: all 0.15s;
+    min-height: 200px;
+    align-self: start;
+    margin-top: 44px;
+    background: #fff;
   }
-  .add-phone-btn:hover { border-color: rgba(255,255,255,0.2); color: var(--text); background: rgba(255,255,255,0.03); }
+  .add-phone-btn:hover { border-color: #9ca3af; color: var(--text); background: #f9fafb; }
 
   /* -- Detail Panel (right side) -- */
   .detail-panel {
@@ -286,7 +419,7 @@ export const comparePageHtml = `<!DOCTYPE html>
     width: 24px; height: 24px; border: none; background: none; color: var(--text-secondary);
     cursor: pointer; font-size: 16px; border-radius: 6px; display: flex; align-items: center; justify-content: center;
   }
-  .detail-panel-close:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+  .detail-panel-close:hover { background: #f3f4f6; color: var(--text); }
   .detail-panel-header-actions { display: flex; align-items: center; gap: 6px; }
   .detail-copy-json {
     padding: 4px 10px; font-size: 11px; font-weight: 500; border-radius: 6px;
@@ -294,8 +427,8 @@ export const comparePageHtml = `<!DOCTYPE html>
     cursor: pointer; transition: all 0.15s; font-family: 'SF Mono', 'Menlo', monospace;
     display: flex; align-items: center; gap: 4px;
   }
-  .detail-copy-json:hover { background: rgba(255,255,255,0.08); color: var(--text); border-color: rgba(255,255,255,0.15); }
-  .detail-copy-json.copied { background: rgba(52,199,89,0.15); color: #34C759; border-color: rgba(52,199,89,0.3); }
+  .detail-copy-json:hover { background: #f9fafb; color: var(--text); border-color: #d1d5db; }
+  .detail-copy-json.copied { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
   .detail-panel-body {
     flex: 1; overflow-y: auto; padding: 16px;
   }
@@ -318,34 +451,34 @@ export const comparePageHtml = `<!DOCTYPE html>
     display: inline-block; padding: 2px 8px; border-radius: 6px;
     font-size: 11px; font-weight: 600;
   }
-  .detail-badge.route { background: rgba(37,99,235,0.15); color: #60a5fa; }
-  .detail-badge.agent { background: rgba(139,92,246,0.15); color: #a78bfa; }
-  .detail-badge.tool { background: rgba(52,199,89,0.15); color: #34C759; }
+  .detail-badge.route { background: #eff6ff; color: #1d4ed8; }
+  .detail-badge.agent { background: #f5f3ff; color: #6d28d9; }
+  .detail-badge.tool { background: #ecfdf5; color: #047857; }
   .detail-tools-list {
     display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;
   }
   .detail-tool-tag {
     padding: 2px 8px; border-radius: 6px; font-size: 11px;
-    background: rgba(255,255,255,0.06); color: var(--text-secondary);
+    background: #f3f4f6; color: var(--text-secondary);
     font-family: 'SF Mono', 'Menlo', monospace;
   }
-  .detail-tool-tag.used { background: rgba(52,199,89,0.15); color: #34C759; }
+  .detail-tool-tag.used { background: #ecfdf5; color: #047857; }
   .detail-full-text {
     font-size: 13px; line-height: 1.6; white-space: pre-wrap;
     word-break: break-word; color: var(--text);
-    background: rgba(255,255,255,0.04); padding: 10px 12px;
-    border-radius: 8px; max-height: 300px; overflow-y: auto;
+    background: #f9fafb; padding: 10px 12px;
+    border-radius: 6px; max-height: 300px; overflow-y: auto; border: 1px solid var(--border);
   }
   .detail-system-prompt {
     font-size: 11px; line-height: 1.5; white-space: pre-wrap;
-    word-break: break-word; color: var(--text-secondary);
-    background: rgba(255,255,255,0.03); padding: 10px 12px;
-    border-radius: 8px; max-height: 200px; overflow-y: auto;
-    font-family: 'SF Mono', 'Menlo', monospace;
+    word-break: break-word; color: #374151;
+    background: #f9fafb; padding: 12px 14px;
+    border-radius: 6px; max-height: min(75vh, 1200px); overflow-y: auto;
+    font-family: ui-monospace, 'SF Mono', 'Menlo', monospace; border: 1px solid var(--border);
   }
   .detail-tool-card {
-    background: rgba(255,255,255,0.04); border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px 12px; margin-top: 6px;
+    background: #f9fafb; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; margin-top: 6px;
   }
   .detail-tool-card-name {
     font-size: 12px; font-weight: 600; font-family: 'SF Mono', 'Menlo', monospace;
@@ -364,7 +497,7 @@ export const comparePageHtml = `<!DOCTYPE html>
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px;
   }
   .detail-stat-box {
-    background: rgba(255,255,255,0.04); border-radius: 6px; padding: 8px 10px;
+    background: #f9fafb; border-radius: 6px; padding: 8px 10px; border: 1px solid var(--border);
   }
   .detail-stat-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
   .detail-stat-value { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
@@ -372,7 +505,7 @@ export const comparePageHtml = `<!DOCTYPE html>
   .detail-ns-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
   .detail-ns-tag {
     font-size: 10px; padding: 2px 6px; border-radius: 4px;
-    background: rgba(255,255,255,0.06); color: var(--text-secondary);
+    background: #f3f4f6; color: var(--text-secondary);
     font-family: 'SF Mono', 'Menlo', monospace;
   }
   .detail-section-toggle {
@@ -396,9 +529,9 @@ export const comparePageHtml = `<!DOCTYPE html>
   .state-label { color: var(--text-secondary); }
   .state-value { font-weight: 500; font-family: 'SF Mono', 'Menlo', monospace; font-size: 12px; }
   .state-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
-  .state-badge.pending { background: rgba(217,119,6,0.15); color: #d97706; }
-  .state-badge.sent { background: rgba(52,199,89,0.15); color: #34C759; }
-  .state-badge.active { background: rgba(37,99,235,0.15); color: #60a5fa; }
+  .state-badge.pending { background: #fffbeb; color: #b45309; }
+  .state-badge.sent { background: #ecfdf5; color: #047857; }
+  .state-badge.active { background: #eff6ff; color: #1d4ed8; }
 
   /* -- Input bar -- */
   .input-bar { flex-shrink: 0; padding: 10px 0 14px; }
@@ -456,15 +589,8 @@ export const comparePageHtml = `<!DOCTYPE html>
   </div>
   <!-- COMPARE MODE -->
   <div id="compare-mode" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
-    <div class="toolbar-row">
-      <div class="system-prompt-toggle" onclick="toggleSystemPrompt()">
-        <span class="chevron" id="sysChevron">&#9654;</span>
-        <span>System prompt</span>
-      </div>
-    </div>
-    <div class="system-prompt-area" id="sysPromptArea">
-      <textarea id="systemPrompt" placeholder="Loading Nest's default prompt..." rows="6"></textarea>
-      <div class="system-prompt-info">Default: Nest's production chat-mode prompt. Edit to override for all columns.</div>
+    <div class="compare-hidden-fields" aria-hidden="true">
+      <textarea id="systemPrompt" placeholder="Loading Nest's default prompt..." rows="2"></textarea>
     </div>
     <div class="content-with-panel">
       <div class="content-main">
@@ -550,15 +676,72 @@ export const comparePageHtml = `<!DOCTYPE html>
   </div>
 </div>
 
+<div id="refineBackdrop" class="refine-backdrop" onclick="if(event.target===this)closeRefineModal()">
+  <div class="refine-dialog" onclick="event.stopPropagation()">
+    <h3>Refine with AI</h3>
+    <p class="refine-sub">Describe what you want (uses GPT-5.4). The model returns the <strong>full updated text</strong> for this field — it merges your request into the existing content, not a new section tacked on the end.</p>
+    <label for="refineInstruction">What should change?</label>
+    <textarea id="refineInstruction" placeholder="e.g. Make the bot funnier and more playful, but still helpful."></textarea>
+    <div class="refine-actions">
+      <button type="button" class="btn-sm" onclick="closeRefineModal()">Cancel</button>
+      <button type="button" class="btn-sm" id="refineSubmitBtn" onclick="submitRefine()" style="background:#111827;color:#fff;border-color:#111827;">Apply</button>
+    </div>
+  </div>
+</div>
+
+<div id="phonePromptBackdrop" class="refine-backdrop phone-prompt-backdrop" onclick="if(event.target===this)closePhonePromptModal()">
+  <div class="refine-dialog phone-prompt-dialog" onclick="event.stopPropagation()">
+    <h3 id="phonePromptTitle">Prompt</h3>
+    <p class="refine-sub" id="phonePromptSub"></p>
+    <div id="phonePromptRouteRow" style="display:none;">
+      <label class="phone-prompt-field-label" for="phonePromptPreset">Route preset</label>
+      <select id="phonePromptPreset" class="phone-prompt-preset-select"></select>
+    </div>
+    <textarea id="phonePromptMainTa" class="phone-prompt-textarea" spellcheck="false" placeholder="Edit system / style instructions…"></textarea>
+    <div class="refine-actions" style="justify-content:flex-end;margin-top:12px;">
+      <button type="button" class="btn-sm" onclick="closePhonePromptModal()">Cancel</button>
+      <button type="button" class="btn-sm" onclick="phonePromptRefineAI()">Refine with AI</button>
+      <button type="button" class="btn-sm" onclick="savePhonePromptModal()" style="background:#111827;color:#fff;border-color:#111827;">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const MAX_PHONES = 3;
 const ALL_MODELS = {
   openai: ['gpt-4.1-mini','gpt-4.1','gpt-4.1-nano','gpt-4o','gpt-4o-mini','gpt-5.4-nano','gpt-5.4-mini','gpt-5.2','gpt-5.4','o3-mini','o4-mini'],
-  gemini: ['gemini-3.1-flash-lite-preview','gemini-2.5-flash','gemini-2.5-pro','gemini-2.0-flash','gemini-2.5-flash-lite','gemini-flash-lite-latest','gemini-2.0-flash-lite','gemini-1.5-pro','gemini-1.5-flash'],
+  gemini: [
+    // Gemini 3.x — see https://ai.google.dev/gemini-api/docs/models
+    'gemini-3.1-pro-preview',
+    'gemini-3.1-pro-preview-customtools',
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite-preview',
+    // Gemini 2.5 — stable + rolling aliases
+    'gemini-2.5-pro',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-flash-latest',
+    'gemini-flash-lite-latest',
+    'gemini-pro-latest',
+    // Gemini 2.0 (deprecated on Google’s timeline; kept for comparison / migration)
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-2.0-flash-thinking-exp',
+    // Gemini 1.5
+    'gemini-1.5-pro',
+    'gemini-1.5-flash',
+    // Specialised / preview (different capabilities or rate limits; may not suit every Compare turn)
+    'gemini-2.5-computer-use-preview-10-2025',
+    'deep-research-pro-preview-12-2025',
+    'gemini-robotics-er-1.5-preview',
+    'gemini-2.5-flash-native-audio-preview-12-2025',
+    'gemini-2.5-flash-preview-tts',
+    'gemini-2.5-pro-preview-tts',
+  ],
   anthropic: ['claude-sonnet-4-20250514','claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-3-haiku-20240307','claude-opus-4-20250514'],
   production: ['Full Pipeline (Agent + Tools)'],
 };
-const PROVIDER_LABELS = { openai: 'OpenAI', gemini: 'Gemini', anthropic: 'Anthropic', production: 'Agent (Prod)' };
+const PROVIDER_LABELS = { openai: 'OpenAI', gemini: 'Gemini', anthropic: 'Anthropic', production: 'Production' };
 const PROVIDER_COLORS = { openai: '#10a37f', gemini: '#4285f4', anthropic: '#d4a574', production: '#FF3B30' };
 const DEFAULT_COLUMNS = [
   { provider: 'production', model: 'Full Pipeline (Agent + Tools)' },
@@ -579,6 +762,12 @@ let colIdCounter = 0;
 let onboardSessionId = null;
 let onboardColumns = [];
 let onboardColIdCounter = 0;
+/** Must match Nest src/compare/api.ts (Anthropic direct merge). */
+const ANTHROPIC_COLUMN_DELIMITER = '\\n\\n--- Column-specific testing ---\\n';
+/** @type {{ type: 'column', colId: string } | { type: 'columnMerged', colId: string }} */
+let refineTarget = { type: 'column', colId: '' };
+/** Open per-iPhone prompt sheet */
+let phonePromptColId = '';
 
 // Message metadata store: msgId -> { text, latencyMs, tokens, production, provider, model, role, colId, turnNumber }
 const msgMetaStore = new Map();
@@ -607,7 +796,8 @@ fetch('/compare/api/users').then(r => r.json()).then(users => {
   }
 }).catch(() => {});
 
-async function onUserChange(handle) {
+/** Loads merged system prompt; pass userMessage so memory ranking matches production buildContext. */
+async function refreshUserContext(handle, userMessage) {
   const badge = document.getElementById('userContextBadge');
   if (!handle) {
     userContextBlock = '';
@@ -618,7 +808,10 @@ async function onUserChange(handle) {
   badge.textContent = 'Loading...';
   badge.style.display = 'inline-block';
   try {
-    const resp = await fetch('/compare/api/user-context?handle=' + encodeURIComponent(handle));
+    const params = new URLSearchParams({ handle });
+    const trimmed = (userMessage || '').trim();
+    if (trimmed) params.set('message', trimmed);
+    const resp = await fetch('/compare/api/user-context?' + params.toString());
     const data = await resp.json();
     if (data.error) { alert(data.error); badge.style.display = 'none'; return; }
     userContextBlock = data.contextBlock || '';
@@ -633,10 +826,19 @@ async function onUserChange(handle) {
     const name = data.profile?.name || handle;
     const parts = [name];
     if (data.accounts?.length) parts.push(data.accounts.length + ' accounts');
-    if (data.memoryItems) parts.push(data.memoryItems + ' memories');
+    if (data.memoryItems != null) {
+      const memLabel = data.memoryItemsPool != null && data.memoryItemsPool > data.memoryItems
+        ? data.memoryItems + '/' + data.memoryItemsPool + ' memories'
+        : data.memoryItems + ' memories';
+      parts.push(memLabel);
+    }
     if (data.timezone) parts.push(data.timezone);
     badge.textContent = parts.join(' \\u00b7 ');
   } catch (err) { alert('Failed: ' + err.message); badge.style.display = 'none'; }
+}
+
+function onUserChange(handle) {
+  return refreshUserContext(handle, '');
 }
 
 // -- Helpers --
@@ -668,11 +870,6 @@ function autoCapitalize(el) {
   if (el.value.length === 1 && el.selectionStart === 1) {
     el.value = el.value.charAt(0).toUpperCase() + el.value.slice(1);
   }
-}
-
-function toggleSystemPrompt() {
-  document.getElementById('sysPromptArea').classList.toggle('visible');
-  document.getElementById('sysChevron').classList.toggle('open');
 }
 
 // -- Detail Panel --
@@ -905,7 +1102,15 @@ function copyDetailJson() {
 
 // -- iPhone frame builder (shared between compare + onboard) --
 
-function buildIPhoneFrame(col, bodyId, providerColor, label) {
+function buildIPhoneFrame(col, bodyId, providerColor, label, showPromptButton) {
+  const bottomBar = showPromptButton !== false
+    ? '<div class="imessage-input-bar imessage-prompt-bar">' +
+      '<button type="button" class="btn-phone-prompt" onclick="openPhonePromptModal(\\'' + col.id + '\\')">Prompt</button>' +
+      '</div>'
+    : '<div class="imessage-input-bar">' +
+      '<div class="imessage-fake-input">iMessage</div>' +
+      '<div class="imessage-send-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" fill="white"/></svg></div>' +
+      '</div>';
   return '<div class="dynamic-island"></div>' +
     '<div class="ios-status-bar">' +
       '<span class="ios-time">9:41</span>' +
@@ -922,11 +1127,7 @@ function buildIPhoneFrame(col, bodyId, providerColor, label) {
       '</div>' +
       '<div class="imessage-name">' + escapeHtml(label) + '</div>' +
     '</div>' +
-    '<div class="imessage-body" id="' + bodyId + '"></div>' +
-    '<div class="imessage-input-bar">' +
-      '<div class="imessage-fake-input">iMessage</div>' +
-      '<div class="imessage-send-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" fill="white"/></svg></div>' +
-    '</div>';
+    '<div class="imessage-body" id="' + bodyId + '"></div>' + bottomBar;
 }
 
 // -- Compare: iPhone column management --
@@ -944,9 +1145,186 @@ function buildProviderOptions(selectedProvider) {
 function addColumn(provider, model) {
   if (columns.length >= MAX_PHONES) return;
   const id = generateColId();
-  columns.push({ id, provider, model, msgCount: 0 });
+  columns.push({ id, provider, model, msgCount: 0, routePreset: 'auto', testPrompt: '' });
   renderPhones();
   return id;
+}
+
+function onColumnPresetChange(colId, value) {
+  const col = columns.find(c => c.id === colId);
+  if (col) col.routePreset = value || 'auto';
+}
+
+function getGlobalSystemPromptValue() {
+  const el = document.getElementById('systemPrompt');
+  return el ? el.value : '';
+}
+
+/** Exact Anthropic system string for this column (matches /compare/api/chat). */
+function buildMergedAnthropicPrompt(colId) {
+  let base = (getGlobalSystemPromptValue() || '').trim();
+  if (!base) base = (defaultSystemPrompt || '').trim();
+  const ta = document.getElementById('testPrompt-' + colId);
+  const append = ta ? ta.value.trim() : '';
+  if (!append) return base;
+  return base + ANTHROPIC_COLUMN_DELIMITER + append;
+}
+
+/** After editing merged Anthropic prompt: split back into global + column add-on. */
+function applyMergedAnthropicToFields(mergedText, colId) {
+  const d = ANTHROPIC_COLUMN_DELIMITER;
+  const idx = mergedText.indexOf(d);
+  if (idx === -1) {
+    document.getElementById('systemPrompt').value = mergedText.trim();
+    const ta0 = document.getElementById('testPrompt-' + colId);
+    if (ta0) ta0.value = '';
+    const c0 = columns.find(function (x) { return x.id === colId; });
+    if (c0) c0.testPrompt = '';
+    return;
+  }
+  const base = mergedText.slice(0, idx);
+  const rest = mergedText.slice(idx + d.length);
+  document.getElementById('systemPrompt').value = base;
+  const ta = document.getElementById('testPrompt-' + colId);
+  if (ta) ta.value = rest;
+  const c = columns.find(function (x) { return x.id === colId; });
+  if (c) c.testPrompt = rest;
+}
+
+function openPhonePromptModal(colId) {
+  phonePromptColId = colId;
+  const col = columns.find(function (c) { return c.id === colId; });
+  if (!col) return;
+  const usesPipeline = col.provider !== 'anthropic';
+  const title = document.getElementById('phonePromptTitle');
+  const sub = document.getElementById('phonePromptSub');
+  const routeRow = document.getElementById('phonePromptRouteRow');
+  const presetSel = document.getElementById('phonePromptPreset');
+  const mainTa = document.getElementById('phonePromptMainTa');
+  const hiddenTp = document.getElementById('testPrompt-' + colId);
+  if (usesPipeline) {
+    title.textContent = 'Prompt — ' + getPhoneLabel(col);
+    sub.textContent = 'Nest builds the main system prompt on the server. Edit below to steer tone, voice, and human-likeness — this block is appended with highest priority. After sending, open Message details on a reply to see the full prompt.';
+    routeRow.style.display = 'block';
+    const preset = col.routePreset || 'auto';
+    presetSel.innerHTML =
+      '<option value="auto"' + (preset === 'auto' ? ' selected' : '') + '>Auto (classifier)</option>' +
+      '<option value="casual_lane"' + (preset === 'casual_lane' ? ' selected' : '') + '>Casual lane (compact)</option>' +
+      '<option value="full_compose"' + (preset === 'full_compose' ? ' selected' : '') + '>Full compose</option>';
+    presetSel.onchange = function () { onColumnPresetChange(colId, presetSel.value); };
+    mainTa.value = hiddenTp ? hiddenTp.value : '';
+  } else {
+    title.textContent = 'System prompt — ' + getPhoneLabel(col);
+    sub.textContent = 'Full system string for this iPhone. Save splits into the shared base and this column’s add-on (see delimiter --- Column-specific testing ---). Editing the shared base affects every Anthropic column.';
+    routeRow.style.display = 'none';
+    mainTa.value = buildMergedAnthropicPrompt(colId);
+  }
+  document.getElementById('phonePromptBackdrop').classList.add('open');
+  mainTa.focus();
+}
+
+function closePhonePromptModal() {
+  document.getElementById('phonePromptBackdrop').classList.remove('open');
+  phonePromptColId = '';
+}
+
+function savePhonePromptModal() {
+  const colId = phonePromptColId;
+  if (!colId) return;
+  const col = columns.find(function (c) { return c.id === colId; });
+  const v = document.getElementById('phonePromptMainTa').value;
+  if (!col) {
+    closePhonePromptModal();
+    return;
+  }
+  if (col.provider === 'anthropic') {
+    applyMergedAnthropicToFields(v, colId);
+  } else {
+    const hiddenTp = document.getElementById('testPrompt-' + colId);
+    if (hiddenTp) hiddenTp.value = v;
+    col.testPrompt = v;
+  }
+  closePhonePromptModal();
+}
+
+function phonePromptRefineAI() {
+  const colId = phonePromptColId;
+  if (!colId) return;
+  const col = columns.find(function (c) { return c.id === colId; });
+  const v = document.getElementById('phonePromptMainTa').value;
+  if (!col) return;
+  if (col.provider === 'anthropic') {
+    applyMergedAnthropicToFields(v, colId);
+  } else {
+    const hiddenTp = document.getElementById('testPrompt-' + colId);
+    if (hiddenTp) hiddenTp.value = v;
+    col.testPrompt = v;
+  }
+  closePhonePromptModal();
+  if (col.provider === 'anthropic') {
+    openRefineModal('columnMerged', colId);
+  } else {
+    openRefineModal('column', colId);
+  }
+}
+
+function syncColumnTestPromptsFromDom() {
+  for (const col of columns) {
+    const ta = document.getElementById('testPrompt-' + col.id);
+    if (ta) col.testPrompt = ta.value;
+  }
+}
+
+function openRefineModal(mode, colId) {
+  if (mode === 'columnMerged') refineTarget = { type: 'columnMerged', colId: colId };
+  else refineTarget = { type: 'column', colId: colId };
+  document.getElementById('refineInstruction').value = '';
+  document.getElementById('refineBackdrop').classList.add('open');
+  document.getElementById('refineInstruction').focus();
+}
+
+function closeRefineModal() {
+  document.getElementById('refineBackdrop').classList.remove('open');
+}
+
+async function submitRefine() {
+  const instr = document.getElementById('refineInstruction').value.trim();
+  if (!instr) return;
+  const btn = document.getElementById('refineSubmitBtn');
+  btn.disabled = true;
+  let currentText = '';
+  if (refineTarget.type === 'columnMerged') {
+    currentText = buildMergedAnthropicPrompt(refineTarget.colId);
+  } else {
+    const ta = document.getElementById('testPrompt-' + refineTarget.colId);
+    currentText = ta ? ta.value : '';
+  }
+  try {
+    const r = await fetch('/compare/api/refine-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentText,
+        instruction: instr,
+        refineMode: refineTarget.type === 'columnMerged' ? 'anthropic_merged' : undefined,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Refine failed');
+    if (refineTarget.type === 'columnMerged') {
+      applyMergedAnthropicToFields(data.prompt, refineTarget.colId);
+    } else {
+      const ta = document.getElementById('testPrompt-' + refineTarget.colId);
+      if (ta) ta.value = data.prompt;
+      const c = columns.find(x => x.id === refineTarget.colId);
+      if (c) c.testPrompt = data.prompt;
+    }
+    closeRefineModal();
+  } catch (e) {
+    alert(e.message || 'Refine failed');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function removeColumn(id) {
@@ -971,12 +1349,22 @@ function onModelChange(colId, newModel) {
 
 function getPhoneLabel(col) {
   if (col.provider === 'production') return 'Production';
+  if (col.provider === 'anthropic') return (PROVIDER_LABELS[col.provider] || col.provider) + ' (direct)';
   return PROVIDER_LABELS[col.provider] || col.provider;
 }
 
 function renderPhones() {
   const container = document.getElementById('phonesContainer');
   container.innerHTML = '';
+
+  const track = [];
+  for (let i = 0; i < columns.length; i++) {
+    track.push('minmax(280px, 1fr)');
+  }
+  if (columns.length < MAX_PHONES) {
+    track.push('minmax(52px, 64px)');
+  }
+  container.style.gridTemplateColumns = track.join(' ');
 
   for (const col of columns) {
     const wrapper = document.createElement('div');
@@ -985,18 +1373,33 @@ function renderPhones() {
     const providerColor = PROVIDER_COLORS[col.provider] || '#888';
     const isProd = col.provider === 'production';
     const label = getPhoneLabel(col);
+    const usesPipeline = col.provider !== 'anthropic';
+    const pipelineBadge = isProd
+      ? '<span style="font-size:10px;color:#374151;background:#f3f4f6;padding:2px 6px;border-radius:6px;font-weight:600;">Pipeline</span>'
+      : usesPipeline
+        ? '<span style="font-size:10px;color:#374151;background:#f3f4f6;padding:2px 6px;border-radius:6px;font-weight:600;">Pipeline</span>'
+        : '<span style="font-size:10px;color:#6b7280;background:#f3f4f6;padding:2px 6px;border-radius:6px;font-weight:600;">Direct</span>';
     wrapper.innerHTML =
       '<div class="phone-selectors">' +
         (columns.length > 1 ? '<button class="phone-remove" onclick="removeColumn(\\'' + col.id + '\\')" title="Remove">&times;</button>' : '') +
         '<select onchange="onProviderChange(\\'' + col.id + '\\', this.value)">' + buildProviderOptions(col.provider) + '</select>' +
         '<select id="model-' + col.id + '" onchange="onModelChange(\\'' + col.id + '\\', this.value)"' + (isProd ? ' disabled' : '') + '>' + buildModelOptions(col.provider, col.model) + '</select>' +
+        pipelineBadge +
       '</div>';
 
     const phone = document.createElement('div');
     phone.className = 'iphone-frame';
     phone.innerHTML = buildIPhoneFrame(col, 'body-' + col.id, providerColor, label);
-
     wrapper.appendChild(phone);
+
+    const hiddenTa = document.createElement('textarea');
+    hiddenTa.id = 'testPrompt-' + col.id;
+    hiddenTa.setAttribute('aria-hidden', 'true');
+    hiddenTa.setAttribute('tabindex', '-1');
+    hiddenTa.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:0;overflow:hidden;';
+    hiddenTa.value = col.testPrompt || '';
+    wrapper.appendChild(hiddenTa);
+
     container.appendChild(wrapper);
   }
 
@@ -1121,7 +1524,12 @@ function switchMode(mode) {
 
 async function sendCompareMessage(prompt) {
   isRunning = true;
+  syncColumnTestPromptsFromDom();
   const btn = document.getElementById('sendBtn'); btn.disabled = true; btn.textContent = 'Sending...';
+  const handle = document.getElementById('userSelect')?.value || '';
+  if (handle) {
+    await refreshUserContext(handle, prompt);
+  }
   document.getElementById('prompt').value = ''; document.getElementById('prompt').style.height = 'auto';
   const systemPrompt = document.getElementById('systemPrompt').value.trim() || undefined;
 
@@ -1132,9 +1540,22 @@ async function sendCompareMessage(prompt) {
 
   const promises = columns.map(async (col) => {
     try {
+      const usesPipeline = col.provider !== 'anthropic';
+      const testFragment = (col.testPrompt || '').trim();
+      const payload = {
+        prompt,
+        systemPrompt,
+        provider: col.provider,
+        model: col.model,
+        sessionId,
+        columnId: col.id,
+        comparePromptAppend: usesPipeline ? testFragment : undefined,
+        compareRoutePreset: usesPipeline ? (col.routePreset || 'auto') : undefined,
+        columnSystemAppend: !usesPipeline ? testFragment : undefined,
+      };
       const resp = await fetch('/compare/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, systemPrompt, provider: col.provider, model: col.model, sessionId, columnId: col.id }),
+        body: JSON.stringify(payload),
       });
       const data = await resp.json();
       removeTypingIndicator('body-' + col.id);
@@ -1193,6 +1614,15 @@ function renderOnboardPhones() {
   const container = document.getElementById('onboardPhonesContainer');
   container.innerHTML = '';
 
+  const obTrack = [];
+  for (let i = 0; i < onboardColumns.length; i++) {
+    obTrack.push('minmax(280px, 1fr)');
+  }
+  if (onboardColumns.length < MAX_PHONES) {
+    obTrack.push('minmax(52px, 64px)');
+  }
+  container.style.gridTemplateColumns = obTrack.join(' ');
+
   for (const col of onboardColumns) {
     const wrapper = document.createElement('div');
     wrapper.className = 'phone-wrapper';
@@ -1209,7 +1639,7 @@ function renderOnboardPhones() {
 
     const phone = document.createElement('div');
     phone.className = 'iphone-frame';
-    phone.innerHTML = buildIPhoneFrame(col, 'body-ob-' + col.id, providerColor, label);
+    phone.innerHTML = buildIPhoneFrame(col, 'body-ob-' + col.id, providerColor, label, false);
 
     wrapper.appendChild(phone);
     container.appendChild(wrapper);
@@ -1346,8 +1776,11 @@ async function sendOnboardMessage(prompt) {
 
 function newConversation() {
   closeDetailPanel();
+  closePhonePromptModal();
+  closeRefineModal();
   if (currentMode === 'onboard') { onboardSessionId = null; startOnboardSession(); return; }
-  fetch('/compare/api/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId }) }).catch(() => {});
+  const allColumnIds = columns.map(c => c.id);
+  fetch('/compare/api/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId, columnIds: allColumnIds }) }).catch(() => {});
   sessionId = generateSessionId();
   document.getElementById('sessionBadge').textContent = sessionId.slice(0, 16);
   renderPhones();
@@ -1356,6 +1789,17 @@ function newConversation() {
 document.getElementById('prompt').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendMessage(); }
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); sendMessage(); }
+});
+
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape') return;
+  if (document.getElementById('phonePromptBackdrop').classList.contains('open')) {
+    e.preventDefault();
+    closePhonePromptModal();
+  } else if (document.getElementById('refineBackdrop').classList.contains('open')) {
+    e.preventDefault();
+    closeRefineModal();
+  }
 });
 </script>
 </body>

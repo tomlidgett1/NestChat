@@ -6,23 +6,29 @@ export { isGeminiModel } from './gemini.ts';
 // Model tiers — change any model with a single-line edit
 //
 //   fast:          Non-reasoning, low-latency (chat, simple Q&A, recall)
+//   brand_chat:    Reasoning model for brand customer-service chat
 //   agent:         Reasoning model for multi-step tool use
+//   critical:      High-quality reasoning for critical automations
 //   orchestration: Lightweight reasoning for routing/classification
 // ═══════════════════════════════════════════════════════════════
 
-export type ModelTier = 'fast' | 'agent' | 'orchestration';
+export type ModelTier = 'fast' | 'brand_chat' | 'agent' | 'critical' | 'orchestration';
 
 export const MODEL_MAP: Record<ModelTier, string> = {
   fast: 'gemini-3.1-flash-lite-preview',
-  agent: 'gpt-5.2',
-  orchestration: 'gpt-5-nano',
+  brand_chat: 'gemini-3-flash-preview',
+  agent: 'gpt-5.4',
+  critical: 'gpt-5.4',
+  orchestration: 'gpt-5.4-nano',
 };
 
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'none';
 
 export const REASONING_EFFORT: Record<ModelTier, ReasoningEffort> = {
   fast: 'none',
+  brand_chat: 'low',
   agent: 'medium',
+  critical: 'medium',
   orchestration: 'low',
 };
 
@@ -36,11 +42,19 @@ export function isReasoningModel(tier: ModelTier): boolean {
 
 let _client: OpenAI | null = null;
 
+export type ResponsesCreateResult = Awaited<ReturnType<OpenAI['responses']['create']>>;
+
 export function getOpenAIClient(): OpenAI {
   if (!_client) {
     _client = new OpenAI({ apiKey: Deno.env.get('OPENAI_API_KEY') });
   }
   return _client;
+}
+
+export function getResponseText(response: ResponsesCreateResult): string {
+  return 'output_text' in response && typeof response.output_text === 'string'
+    ? response.output_text
+    : '';
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -146,7 +160,7 @@ export async function classifyConfirmation(
         max_output_tokens: 16,
         store: false,
       } as Parameters<typeof client.responses.create>[0]);
-      answer = (response.output_text ?? '').trim().toLowerCase();
+      answer = getResponseText(response).trim().toLowerCase();
     }
 
     const ms = Date.now() - start;

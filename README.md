@@ -50,7 +50,8 @@ ngrok http 3000
 | `OPENAI_API_KEY` | OpenAI API key for Whisper and DALL-E |
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_PUBLISHABLE_KEY` | Optional Supabase publishable key |
-| `SUPABASE_ANON_KEY` | Supabase anon key used for Data API access if no service role key is set |
+| `SUPABASE_SECRET_KEY` | Supabase server secret key for backend/admin access |
+| `NEW_SUPABASE_SECRET_KEY` | Same value as `SUPABASE_SECRET_KEY` when Supabase Edge secrets require the reserved-name workaround |
 | `SUPABASE_CONVERSATIONS_TABLE` | Conversations table name, defaults to `conversations` |
 | `SUPABASE_USER_PROFILES_TABLE` | User profiles table name, defaults to `user_profiles` |
 | `SENDBLUE_API_KEY` | Sendblue API key ID |
@@ -137,7 +138,7 @@ src/
 - Group messaging support in Sendblue is beta and plan-gated.
 - Read receipts and typing indicators are best-effort and primarily iMessage-specific.
 - Custom emoji reactions are implemented as a direct Sendblue reaction payload assumption and should be validated against your account behaviour.
-- The included `supabase/schema.sql` uses permissive `anon` policies so the provided publishable/anon keys can read and write. For a tighter production setup, switch to a service role key and stricter RLS.
+- The included `supabase/schema.sql` uses permissive policies for local iteration. For production, prefer tighter RLS plus the server secret key for backend/admin access.
 
 ## Models Used
 

@@ -8,7 +8,7 @@ export const researchAgent: AgentConfig = {
   modelTier: 'fast',
   maxOutputTokens: 8192,
   toolPolicy: {
-    allowedNamespaces: ['memory.read', 'web.search', 'knowledge.search', 'contacts.read', 'messaging.react', 'travel.search'],
+    allowedNamespaces: ['memory.read', 'web.search', 'knowledge.search', 'contacts.read', 'messaging.react', 'travel.search', 'weather.search'],
     blockedNamespaces: ['email.write', 'admin.internal'],
     maxToolRounds: 4,
   },

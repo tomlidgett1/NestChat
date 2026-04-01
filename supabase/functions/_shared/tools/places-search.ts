@@ -212,25 +212,28 @@ export const placesSearchTool: ToolContract = {
     const placeId = input.place_id as string | undefined;
 
     if (!query && !placeId) {
-      return { content: JSON.stringify({ error: "Provide 'query' (text search) or 'place_id' (details)." }) };
+      const error = { error: "Provide 'query' (text search) or 'place_id' (details)." };
+      return { content: JSON.stringify(error), structuredData: error };
     }
 
     const apiKey = getOptionalEnv('GOOGLE_MAPS_API_KEY');
     if (!apiKey) {
       const searchQuery = query ?? `place details ${placeId}`;
-      return { content: JSON.stringify({ error: 'Google Maps not configured. Use web_search as fallback.', fallback_query: searchQuery }) };
+      const error = { error: 'Google Maps not configured. Use web_search as fallback.', fallback_query: searchQuery };
+      return { content: JSON.stringify(error), structuredData: error };
     }
 
     try {
       if (placeId) {
         const result = await placesDetail(apiKey, placeId);
-        return { content: JSON.stringify(result) };
+        return { content: JSON.stringify(result), structuredData: result };
       }
       const result = await placesTextSearch(apiKey, query!, input);
-      return { content: JSON.stringify(result) };
+      return { content: JSON.stringify(result), structuredData: result };
     } catch (e) {
       console.error('[places_search] error:', (e as Error).message);
-      return { content: JSON.stringify({ error: (e as Error).message, fallback_query: query ?? `place ${placeId}` }) };
+      const error = { error: (e as Error).message, fallback_query: query ?? `place ${placeId}` };
+      return { content: JSON.stringify(error), structuredData: error };
     }
   },
 };

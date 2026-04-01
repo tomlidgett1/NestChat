@@ -14,6 +14,7 @@ export const chatAgent: AgentConfig = {
       "media.generate",
       "web.search",
       "travel.search",
+      "weather.search",
     ],
     blockedNamespaces: ["email.read", "email.write", "admin.internal"],
     maxToolRounds: 3,

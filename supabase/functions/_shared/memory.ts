@@ -33,6 +33,7 @@ export interface CandidateMemory {
   durability: 'durable' | 'temporary' | 'uncertain' | 'corrected';
   sourceMessageIds: number[];
   sourceKind: SourceKind;
+  metadata?: Record<string, unknown>;
 }
 
 export type AdjudicationAction =
@@ -82,12 +83,110 @@ const CATEGORY_ALIASES: Record<string, string> = {
   'trip': 'travel', 'vacation': 'travel', 'holiday': 'travel', 'flight': 'travel',
 };
 
+const LOCATION_ROLE_VALUES = new Set(['home', 'current', 'frequent']);
+const LOCATION_CURRENT_PATTERN =
+  /\b(currently|right now|at the moment|for now|staying|visiting|in town|travelling|traveling|back in|this week|today|tonight)\b/i;
+const LOCATION_FREQUENT_PATTERN =
+  /\b(often|usually|regularly|frequently|office in|work in|parents in|family in|weekends in)\b/i;
+const LOCATION_ADDRESS_PATTERN =
+  /\b\d{1,5}\s+[\w'.-]+\s+(street|st|road|rd|avenue|ave|boulevard|blvd|drive|dr|lane|ln|way|place|pl|court|ct|crescent|cr|parade|pde|highway|hwy|circuit)\b/i;
+const LOCATION_STATE_PATTERN =
+  /\b(vic|victoria|nsw|new south wales|qld|queensland|wa|western australia|sa|south australia|tas|tasmania|act|nt|california|new york|texas|england|scotland|wales)\b/i;
+const LOCATION_SUBURB_PATTERN =
+  /\b(cbd|suburb|district|neighbourhood|neighborhood|borough|shire)\b/i;
+
 export function normaliseCategory(raw: string): string {
   const cleaned = raw.toLowerCase().trim().replace(/[\s_-]+/g, '_');
   if (ALL_CATEGORIES.has(cleaned)) return cleaned;
   const aliased = CATEGORY_ALIASES[raw.toLowerCase().trim()];
   if (aliased) return aliased;
   return CATEGORY_TAXONOMY.fallback;
+}
+
+function readMetaString(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string | null {
+  const value = metadata?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function inferLocationRoleFromText(value: string): 'home' | 'current' | 'frequent' {
+  if (LOCATION_CURRENT_PATTERN.test(value)) return 'current';
+  if (LOCATION_FREQUENT_PATTERN.test(value)) return 'frequent';
+  return 'home';
+}
+
+function inferLocationPrecisionFromText(value: string): string {
+  if (LOCATION_ADDRESS_PATTERN.test(value)) return 'address';
+  if (LOCATION_SUBURB_PATTERN.test(value)) return 'suburb';
+  if (LOCATION_STATE_PATTERN.test(value) && value.includes(',')) return 'suburb';
+  if (LOCATION_STATE_PATTERN.test(value)) return 'state';
+  if (value.split(',').length >= 2) return 'city';
+  if (value.trim().split(/\s+/).length <= 3) return 'city';
+  return 'unknown';
+}
+
+function getCandidateLocationRole(candidate: CandidateMemory): 'home' | 'current' | 'frequent' {
+  const metaRole = readMetaString(candidate.metadata, 'role')?.toLowerCase();
+  if (metaRole && LOCATION_ROLE_VALUES.has(metaRole)) {
+    return metaRole as 'home' | 'current' | 'frequent';
+  }
+  return inferLocationRoleFromText(candidate.valueText);
+}
+
+function getMemoryLocationRole(memory: MemoryItem): 'home' | 'current' | 'frequent' {
+  const metaRole = readMetaString(memory.metadata, 'role')?.toLowerCase();
+  if (metaRole && LOCATION_ROLE_VALUES.has(metaRole)) {
+    return metaRole as 'home' | 'current' | 'frequent';
+  }
+  return inferLocationRoleFromText(memory.valueText);
+}
+
+function getCandidateSingularScope(candidate: CandidateMemory): string | null {
+  if (!SINGULAR_CATEGORIES.has(candidate.category)) return null;
+  if (candidate.category !== 'location') return candidate.category;
+
+  const role = getCandidateLocationRole(candidate);
+  if (role === 'frequent') return null;
+  return `location:${role}`;
+}
+
+function getMemorySingularScope(memory: MemoryItem): string | null {
+  if (!SINGULAR_CATEGORIES.has(memory.category)) return null;
+  if (memory.category !== 'location') return memory.category;
+
+  const role = getMemoryLocationRole(memory);
+  if (role === 'frequent') return null;
+  return `location:${role}`;
+}
+
+function buildCandidateMetadata(candidate: CandidateMemory): Record<string, unknown> {
+  const metadata = { ...(candidate.metadata ?? {}) };
+
+  if (candidate.category === 'location') {
+    if (!readMetaString(metadata, 'role')) {
+      metadata.role = getCandidateLocationRole(candidate);
+    }
+    if (!readMetaString(metadata, 'precision')) {
+      metadata.precision = inferLocationPrecisionFromText(candidate.valueText);
+    }
+    if (!readMetaString(metadata, 'freshness_hint')) {
+      metadata.freshness_hint = metadata.role === 'current'
+        ? 'short_lived'
+        : metadata.role === 'frequent'
+        ? 'recurring'
+        : 'stable';
+    }
+  }
+
+  if (!readMetaString(metadata, 'explicitness')) {
+    metadata.explicitness = candidate.sourceKind === 'legacy_migration'
+      ? 'inferred'
+      : 'explicit';
+  }
+
+  return metadata;
 }
 
 const CLASSIFY_CATEGORY_PROMPT = `You are a memory category classifier. Given a fact about a person, pick the single best category from this list:
@@ -360,8 +459,19 @@ export function filterCandidate(
 
   if (!candidate.normalizedValue) return 'reject';
 
+  const candidateSingularScope = getCandidateSingularScope(candidate);
+  const candidateLocationRole = candidate.category === 'location'
+    ? getCandidateLocationRole(candidate)
+    : null;
+
   const exactMatch = existingMemories.find(
-    (m) => m.normalizedValue === candidate.normalizedValue && m.status === 'active',
+    (m) =>
+      m.status === 'active' &&
+      m.normalizedValue === candidate.normalizedValue &&
+      (
+        candidate.category !== 'location' ||
+        getMemoryLocationRole(m) === candidateLocationRole
+      ),
   );
   if (exactMatch) return 'reject';
 
@@ -369,9 +479,9 @@ export function filterCandidate(
     (m) => m.memoryType === candidate.memoryType && m.status === 'active',
   );
 
-  if (SINGULAR_CATEGORIES.has(candidate.category)) {
+  if (candidateSingularScope) {
     const sameCategoryExists = sameTypeMemories.some(
-      (m) => m.category === candidate.category,
+      (m) => getMemorySingularScope(m) === candidateSingularScope,
     );
     if (sameCategoryExists) return 'needs_adjudication';
   }
@@ -379,9 +489,15 @@ export function filterCandidate(
   for (const existing of sameTypeMemories) {
     if (!existing.normalizedValue || !candidate.normalizedValue) continue;
 
-    if (existing.category !== 'general' && existing.category === candidate.category) {
+    const sameSemanticBucket = candidate.category === 'location'
+      ? getMemoryLocationRole(existing) === candidateLocationRole
+      : existing.category !== 'general' && existing.category === candidate.category;
+
+    if (sameSemanticBucket) {
       return 'needs_adjudication';
     }
+
+    if (candidate.category === 'location') continue;
 
     const similarity = computeStringSimilarity(
       existing.normalizedValue,
@@ -412,16 +528,32 @@ export async function adjudicateCandidate(
   candidate: CandidateMemory,
   existingMemories: MemoryItem[],
 ): Promise<AdjudicationAction> {
+  const candidateSingularScope = getCandidateSingularScope(candidate);
+  const candidateLocationRole = candidate.category === 'location'
+    ? getCandidateLocationRole(candidate)
+    : null;
   const relevantExisting = existingMemories
     .filter((m) => m.status === 'active')
+    .filter((m) =>
+      candidate.category !== 'location' ||
+      getMemoryLocationRole(m) === candidateLocationRole ||
+      m.normalizedValue === candidate.normalizedValue
+    )
     .slice(0, 10);
 
   const existingList = relevantExisting
-    .map((m, i) => `${i + 1}. [id=${m.id}] (${m.memoryType}, category=${m.category}) "${m.valueText}"`)
+    .map((m, i) => {
+      const locationRole = m.category === 'location'
+        ? `, role=${getMemoryLocationRole(m)}`
+        : '';
+      return `${i + 1}. [id=${m.id}] (${m.memoryType}, category=${m.category}${locationRole}) "${m.valueText}"`;
+    })
     .join('\n');
 
-  const isSingular = SINGULAR_CATEGORIES.has(candidate.category);
-  const sameCategoryExisting = relevantExisting.filter((m) => m.category === candidate.category);
+  const isSingular = candidateSingularScope !== null;
+  const sameCategoryExisting = relevantExisting.filter((m) =>
+    getMemorySingularScope(m) === candidateSingularScope
+  );
 
   let singularHint = '';
   if (isSingular && sameCategoryExisting.length > 0) {
@@ -429,12 +561,19 @@ export async function adjudicateCandidate(
     singularHint = `\n\nIMPORTANT: "${candidate.category}" is a SINGULAR category — a person can only have one active value. The new candidate and existing memory id(s) ${ids} share this category. Unless the new candidate is clearly wrong, you should SUPERSEDE the old one.`;
   }
 
+  const locationRoleHint = candidate.category === 'location'
+    ? `\n\nSpecial location role rules:
+- Candidate location role: ${candidateLocationRole}
+- home and current locations are distinct roles and should NOT supersede each other.
+- frequent locations can coexist with home and current locations.`
+    : '';
+
   const prompt = `You are a memory adjudication system. Given existing memories and a new candidate, decide what to do.
 
 Existing memories for this person:
 ${existingList || '(none)'}
 
-New candidate: (${candidate.memoryType}, category=${candidate.category}) "${candidate.valueText}" confidence=${candidate.confidence}${singularHint}
+New candidate: (${candidate.memoryType}, category=${candidate.category}${candidateLocationRole ? `, role=${candidateLocationRole}` : ''}) "${candidate.valueText}" confidence=${candidate.confidence}${singularHint}${locationRoleHint}
 
 Category types:
 - SINGULAR categories (location, employment, education, age, birthday, relationship_status, nationality, native_language): Only ONE value should be active at a time. If the new candidate shares a singular category with an existing memory, it almost certainly SUPERSEDES it.
@@ -537,6 +676,8 @@ export async function writeMemoryItem(
   action: AdjudicationAction,
   sourceSummaryId?: number | null,
 ): Promise<number | null> {
+  const metadata = buildCandidateMetadata(candidate);
+
   switch (action.type) {
     case 'REJECT':
       return null;
@@ -559,6 +700,7 @@ export async function writeMemoryItem(
         sourceSummaryId: sourceSummaryId ?? null,
         extractorVersion: EXTRACTOR_VERSION,
         expiryAt: calculateExpiry(candidate.memoryType, candidate.confidence),
+        metadata,
       });
     }
 
@@ -577,6 +719,7 @@ export async function writeMemoryItem(
         extractorVersion: EXTRACTOR_VERSION,
         expiryAt: calculateExpiry(candidate.memoryType, candidate.confidence),
         supersedesMemoryId: action.existingId,
+        metadata,
       });
 
       if (newId) {
@@ -601,6 +744,7 @@ export async function writeMemoryItem(
         sourceSummaryId: sourceSummaryId ?? null,
         extractorVersion: EXTRACTOR_VERSION,
         expiryAt: calculateExpiry(candidate.memoryType, candidate.confidence),
+        metadata,
       });
     }
   }
@@ -854,8 +998,102 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
 };
 
 const FAST_DECAY_TYPES = new Set<string>(['plan', 'task_commitment', 'emotional_context', 'contextual_note']);
+type MemoryQueryIntent =
+  | 'default'
+  | 'weather'
+  | 'local_discovery'
+  | 'service_availability'
+  | 'local_rules'
+  | 'exact_travel';
 
-export function scoreMemory(memory: MemoryItem, currentMessage: string): number {
+const WEATHER_QUERY_PATTERN =
+  /\b(weather|forecast|rain(ing)?|temperature|degrees|humid|cold .{0,10}outside|hot .{0,10}outside|warm .{0,10}outside|freezing|sunny|cloudy|storm|snow(ing)?|uv|umbrella|jacket|sunset|sunrise|air quality)\b/i;
+const LOCAL_DISCOVERY_QUERY_PATTERN =
+  /\b(near me|nearby|nearest|open now|around here|restaurants?|cafe|cafes|coffee|brunch|lunch|dinner|bar|pub|pharmacy|chemist|park|gym|supermarket|grocer|dog[-\s]?friendly|what'?s on|events?|markets?|gig|show|festival)\b/i;
+const SERVICE_AVAILABILITY_QUERY_PATTERN =
+  /\b(deliver(?:y)?|available here|same[-\s]?day|coverage|provider|providers|internet|ubereats|doordash|instacart|service area|ship here)\b/i;
+const LOCAL_RULES_QUERY_PATTERN =
+  /\b(legal|law|rebate|eligible|eligibility|permit|allowed|tax|jurisdiction|public holiday|rules?)\b/i;
+const EXACT_TRAVEL_QUERY_PATTERN =
+  /\b(directions?\b|how long to get|how far to|from .{1,40} to .{1,40}|walk to|drive to|cycle to|train from .{1,40} to|bus from .{1,40} to|tram from .{1,40} to|flight from .{1,40} to)\b/i;
+
+function inferMemoryQueryIntent(currentMessage: string): MemoryQueryIntent {
+  if (EXACT_TRAVEL_QUERY_PATTERN.test(currentMessage)) return 'exact_travel';
+  if (WEATHER_QUERY_PATTERN.test(currentMessage)) return 'weather';
+  if (LOCAL_RULES_QUERY_PATTERN.test(currentMessage)) return 'local_rules';
+  if (SERVICE_AVAILABILITY_QUERY_PATTERN.test(currentMessage)) return 'service_availability';
+  if (LOCAL_DISCOVERY_QUERY_PATTERN.test(currentMessage)) return 'local_discovery';
+  return 'default';
+}
+
+const SEMANTIC_LOOKUP_STRONG_SIGNAL =
+  /\?|^(what|who|where|when|why|how|which|tell me|explain|describe|compare|summari[sz]e|rewrite|remind me|search|look up|find|check|show|give me|can you|could you|would you|should i|do i|did i|have i|am i|are we|is it)\b|\b(weather|forecast|news|price|calendar|email|meeting|flight|booking|itinerary|ticket|address|phone number|reminder|today|tomorrow|tonight|yesterday|this week|next week|weekend)\b/i;
+
+const SHORT_CONVERSATIONAL_FOLLOWUP_PATTERN =
+  /^(?:yeah|yep|yup|nah|na|nope|lol|haha|hahaha|lmao|rofl|wow|damn|nice|cool|awesome|perfect|amazing|interesting|right|true|same|fair(?: enough)?|all good|sounds good|so good|too good|love it|love that|hate that|makes sense|that makes sense|that tracks|exactly|so true|too true|for sure|definitely|defo|absolutely|100%|i know(?: right)?|whole thing|the whole thing|all of it(?: was)?(?: so)?(?: good)?|every bit of it|both honestly|pretty much|kind of|sort of|not really|maybe|probably|reckon so)[.!?]*$/i;
+
+export function shouldSkipSemanticMemoryLookup(currentMessage: string): boolean {
+  const message = currentMessage.trim().replace(/\s+/g, ' ');
+  if (!message || message.length > 80) return false;
+  if (SEMANTIC_LOOKUP_STRONG_SIGNAL.test(message)) return false;
+  return SHORT_CONVERSATIONAL_FOLLOWUP_PATTERN.test(message);
+}
+
+function isLocationMemory(memory: MemoryItem): boolean {
+  return memory.category === 'location' || memory.category.includes('location') ||
+    memory.category.includes('home') || memory.category.includes('city') ||
+    memory.category.includes('address') || memory.category.includes('based');
+}
+
+function isPreferenceLikeMemory(memory: MemoryItem): boolean {
+  return memory.memoryType === 'preference' ||
+    ['food', 'preference', 'health', 'hobby', 'interest'].includes(memory.category);
+}
+
+// Stable memory types get no freshness decay — they remain relevant indefinitely
+// until superseded. Only transient types (plans, emotions, notes) and
+// ephemeral location roles decay.
+const STABLE_MEMORY_TYPES = new Set<string>(['identity', 'preference', 'bio_fact', 'relationship']);
+
+function getMemoryHalfLifeDays(memory: MemoryItem): number {
+  if (FAST_DECAY_TYPES.has(memory.memoryType)) return 3;
+  if (STABLE_MEMORY_TYPES.has(memory.memoryType)) return Infinity;
+  if (isLocationMemory(memory)) {
+    const role = getMemoryLocationRole(memory);
+    if (role === 'current') return 1;
+    if (role === 'frequent') return 21;
+    return Infinity; // home locations are stable
+  }
+  return 90;
+}
+
+function getLocationIntentBoost(
+  memory: MemoryItem,
+  intent: MemoryQueryIntent,
+): number {
+  if (!isLocationMemory(memory)) return 0;
+
+  const role = getMemoryLocationRole(memory);
+  switch (intent) {
+    case 'weather':
+      return role === 'current' ? 0.35 : role === 'home' ? 0.28 : 0.18;
+    case 'local_discovery':
+      return role === 'current' ? 0.32 : role === 'home' ? 0.24 : 0.16;
+    case 'service_availability':
+    case 'local_rules':
+      return role === 'home' ? 0.3 : role === 'current' ? 0.22 : 0.14;
+    case 'exact_travel':
+      return 0.08;
+    default:
+      return 0;
+  }
+}
+
+export function scoreMemory(
+  memory: MemoryItem,
+  currentMessage: string,
+  intent: MemoryQueryIntent = inferMemoryQueryIntent(currentMessage),
+): number {
   const msgWords = new Set(currentMessage.toLowerCase().split(/\s+/).filter((w) => w.length > 2));
   const memWords = new Set((memory.normalizedValue || memory.valueText).toLowerCase().split(/\s+/).filter((w) => w.length > 2));
 
@@ -870,15 +1108,24 @@ export function scoreMemory(memory: MemoryItem, currentMessage: string): number 
     const hits = keywords.filter((kw) => msgLower.includes(kw)).length;
     categoryBoost = Math.min(hits * 0.07, 0.2);
   }
+  categoryBoost += getLocationIntentBoost(memory, intent);
+  if (intent === 'local_discovery' && isPreferenceLikeMemory(memory)) {
+    categoryBoost += 0.1;
+  }
 
   const confidenceWeight = memory.confidence * 0.2;
 
   let freshnessWeight = 0.2;
-  if (memory.lastConfirmedAt) {
-    const ageMs = Date.now() - new Date(memory.lastConfirmedAt).getTime();
-    const ageDays = ageMs / (1000 * 60 * 60 * 24);
-    const halfLife = FAST_DECAY_TYPES.has(memory.memoryType) ? 3 : 30;
-    freshnessWeight = 0.2 * Math.exp(-0.693 * ageDays / halfLife);
+  const freshnessAnchor = memory.lastConfirmedAt ?? memory.lastSeenAt ?? memory.createdAt;
+  if (freshnessAnchor) {
+    const halfLife = getMemoryHalfLifeDays(memory);
+    if (halfLife === Infinity) {
+      freshnessWeight = 0.2; // no decay for stable types
+    } else {
+      const ageMs = Date.now() - new Date(freshnessAnchor).getTime();
+      const ageDays = ageMs / (1000 * 60 * 60 * 24);
+      freshnessWeight = 0.2 * Math.exp(-0.693 * ageDays / halfLife);
+    }
   }
 
   let typeWeight = 0.05;
@@ -888,17 +1135,208 @@ export function scoreMemory(memory: MemoryItem, currentMessage: string): number 
   return lexicalOverlap + categoryBoost + confidenceWeight + freshnessWeight + typeWeight;
 }
 
+// Core identity categories that are ALWAYS injected into context regardless of
+// relevance scoring. These represent fundamental facts about who the user is.
+const CORE_IDENTITY_CATEGORIES = new Set([
+  'name', 'location', 'employment', 'age', 'birthday', 'nationality',
+]);
+
+function isCoreIdentityMemory(memory: MemoryItem): boolean {
+  return memory.memoryType === 'identity' && CORE_IDENTITY_CATEGORIES.has(memory.category);
+}
+
+export interface MemoryRetrievalTimings {
+  totalMs: number;
+  activeItemsMs: number;
+  semanticLookupMs: number;
+  embeddingMs: number;
+  vectorSearchMs: number;
+  scoringMs: number;
+  semanticSkipped: boolean;
+}
+
+interface SemanticMemoryLookupResult {
+  ids: Set<number>;
+  timings: Pick<
+    MemoryRetrievalTimings,
+    'semanticLookupMs' | 'embeddingMs' | 'vectorSearchMs'
+  >;
+}
+
+/**
+ * Search the embedding index for memory items semantically similar to the
+ * current message. Returns memory IDs found via vector search so they can
+ * be merged with the keyword-scored pool.
+ */
+async function getSemanticMemoryIdsWithTimings(
+  handle: string,
+  currentMessage: string,
+  matchCount = 15,
+): Promise<SemanticMemoryLookupResult> {
+  const ids = new Set<number>();
+  const semanticStart = Date.now();
+  let embeddingMs = 0;
+  let vectorSearchMs = 0;
+  try {
+    const { getEmbedding, vectorString } = await import('./rag-tools.ts');
+    const supabase = getAdminClient();
+
+    const embeddingStart = Date.now();
+    const embedding = await getEmbedding(currentMessage);
+    embeddingMs = Date.now() - embeddingStart;
+    const embStr = vectorString(embedding);
+
+    const vectorSearchStart = Date.now();
+    const { data, error } = await supabase.rpc('match_search_documents', {
+      p_handle: handle,
+      query_embedding: embStr,
+      match_count: matchCount,
+      source_filters: ['memory_summary'],
+      min_score: 0.25,
+    });
+    vectorSearchMs = Date.now() - vectorSearchStart;
+
+    if (!error && data) {
+      for (const row of data as Array<{ metadata?: { memory_id?: number } }>) {
+        const memId = row.metadata?.memory_id;
+        if (typeof memId === 'number') ids.add(memId);
+      }
+    }
+  } catch (err) {
+    console.warn('[memory] Semantic memory search failed, falling back to keyword-only:', (err as Error).message);
+  }
+  return {
+    ids,
+    timings: {
+      semanticLookupMs: Date.now() - semanticStart,
+      embeddingMs,
+      vectorSearchMs,
+    },
+  };
+}
+
+export async function getRelevantMemoryItemsWithTimings(
+  handle: string,
+  currentMessage: string,
+  limit = 20,
+): Promise<{ items: MemoryItem[]; timings: MemoryRetrievalTimings }> {
+  const retrievalStart = Date.now();
+  const skipSemanticLookup = shouldSkipSemanticMemoryLookup(currentMessage);
+  const timings: MemoryRetrievalTimings = {
+    totalMs: 0,
+    activeItemsMs: 0,
+    semanticLookupMs: 0,
+    embeddingMs: 0,
+    vectorSearchMs: 0,
+    scoringMs: 0,
+    semanticSkipped: skipSemanticLookup,
+  };
+
+  if (skipSemanticLookup) {
+    console.log(
+      `[memory] skipping semantic lookup for short conversational follow-up: "${currentMessage.substring(0, 80)}"`,
+    );
+  }
+
+  const activeItemsPromise = (async () => {
+    const start = Date.now();
+    const items = await getActiveMemoryItems(handle, 200);
+    timings.activeItemsMs = Date.now() - start;
+    return items;
+  })();
+
+  const semanticLookupPromise = skipSemanticLookup
+    ? Promise.resolve({
+      ids: new Set<number>(),
+      timings: {
+        semanticLookupMs: 0,
+        embeddingMs: 0,
+        vectorSearchMs: 0,
+      },
+    } satisfies SemanticMemoryLookupResult)
+    : getSemanticMemoryIdsWithTimings(handle, currentMessage);
+
+  // Fetch a larger pool (200 instead of 50) so we don't miss important older memories
+  const [all, semanticLookup] = await Promise.all([
+    activeItemsPromise,
+    semanticLookupPromise,
+  ]);
+  const semanticIds = semanticLookup.ids;
+  timings.semanticLookupMs = semanticLookup.timings.semanticLookupMs;
+  timings.embeddingMs = semanticLookup.timings.embeddingMs;
+  timings.vectorSearchMs = semanticLookup.timings.vectorSearchMs;
+
+  if (all.length === 0) {
+    timings.totalMs = Date.now() - retrievalStart;
+    return { items: [], timings };
+  }
+
+  const scoringStart = Date.now();
+  // Phase 1: Always-include core identity memories (name, location, job, etc.)
+  const coreIdentity: MemoryItem[] = [];
+  const nonCore: MemoryItem[] = [];
+  for (const m of all) {
+    if (isCoreIdentityMemory(m)) {
+      coreIdentity.push(m);
+    } else {
+      nonCore.push(m);
+    }
+  }
+
+  const seenIds = new Set<number>(coreIdentity.map((m) => m.id));
+
+  // Phase 2: Score remaining memories, boosting those found via semantic search
+  const intent = inferMemoryQueryIntent(currentMessage);
+  const SEMANTIC_BOOST = 0.25;
+  const scored = nonCore.map((m) => {
+    let score = scoreMemory(m, currentMessage, intent);
+    if (semanticIds.has(m.id)) score += SEMANTIC_BOOST;
+    return { memory: m, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  // Phase 3: Fill remaining slots with intent-prioritised then score-ranked memories
+  const remaining = limit - coreIdentity.length;
+  const selected: Array<{ memory: MemoryItem; score: number }> = [];
+
+  const pushMatches = (
+    predicate: (entry: { memory: MemoryItem; score: number }) => boolean,
+    maxCount: number,
+  ) => {
+    for (const entry of scored) {
+      if (selected.length >= remaining) return;
+      if (seenIds.has(entry.memory.id) || !predicate(entry)) continue;
+      selected.push(entry);
+      seenIds.add(entry.memory.id);
+      if (maxCount > 0 && selected.filter(predicate).length >= maxCount) return;
+    }
+  };
+
+  if (['weather', 'local_discovery', 'service_availability', 'local_rules'].includes(intent)) {
+    pushMatches((entry) => isLocationMemory(entry.memory), 2);
+  }
+  if (intent === 'local_discovery') {
+    pushMatches((entry) => isPreferenceLikeMemory(entry.memory), 1);
+  }
+  pushMatches(() => true, remaining);
+
+  timings.scoringMs = Date.now() - scoringStart;
+  timings.totalMs = Date.now() - retrievalStart;
+
+  return { items: [...coreIdentity, ...selected.map((s) => s.memory)], timings };
+}
+
 export async function getRelevantMemoryItems(
   handle: string,
   currentMessage: string,
   limit = 20,
 ): Promise<MemoryItem[]> {
-  const all = await getActiveMemoryItems(handle, 50);
-  if (all.length === 0) return [];
-
-  const scored = all.map((m) => ({ memory: m, score: scoreMemory(m, currentMessage) }));
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit).map((s) => s.memory);
+  const { items } = await getRelevantMemoryItemsWithTimings(
+    handle,
+    currentMessage,
+    limit,
+  );
+  return items;
 }
 
 export function scoreSummary(summary: ConversationSummary, currentMessage: string): number {

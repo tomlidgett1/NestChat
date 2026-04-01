@@ -70,3 +70,20 @@ BEGIN
             FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
     END IF;
 END $$;
+
+-- ── Increment messages_since_link counter ──────────────────
+CREATE OR REPLACE FUNCTION public.increment_group_messages_since_link(p_chat_id text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public.group_chats
+  SET
+    messages_since_link = messages_since_link + 1,
+    last_activity_at = now(),
+    updated_at = now()
+  WHERE chat_id = p_chat_id;
+END;
+$$;

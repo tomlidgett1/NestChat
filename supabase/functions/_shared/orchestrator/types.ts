@@ -54,7 +54,9 @@ export type ToolNamespace =
   | "messaging.effect"
   | "media.generate"
   | "travel.search"
+  | "weather.search"
   | "reminders.manage"
+  | "notifications.watch"
   | "admin.internal";
 
 export type SideEffect = "read" | "draft" | "commit";
@@ -84,7 +86,9 @@ export type Capability =
   | "memory.read"
   | "memory.write"
   | "travel.search"
+  | "weather.search"
   | "reminders.manage"
+  | "notifications.watch"
   | "deep_profile";
 
 export type MemoryDepth = "none" | "light" | "full";
@@ -143,7 +147,7 @@ export interface RouteDecision {
   classifierResult?: ClassifierResult;
   memoryDepth?: MemoryDepth;
   forcedToolChoice?: string;
-  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0B-research" | "0B-group" | "0C";
+  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0B-research" | "0B-recall" | "0B-group" | "0C";
   routeReason?: string;
   matchedDisqualifierBucket?: string | null;
   hadPendingState?: boolean;
@@ -224,6 +228,14 @@ export interface TurnInput {
   onboardingContext?: OnboardingContext;
   isProactiveReply?: boolean;
   timezone?: string | null;
+  /** Override the model used in the agent loop (for admin compare testing) */
+  modelOverride?: string;
+  /** DBG# sessions only: text appended to the composed system prompt (compare tab A/B testing). */
+  comparePromptAppend?: string;
+  /** DBG# sessions only: force casual compact lane vs full compose path. */
+  compareRoutePreset?: "auto" | "casual_lane" | "full_compose";
+  /** When true, the response will be delivered as a voice memo — write for spoken delivery. */
+  voiceMode?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -247,6 +259,40 @@ export interface TurnContext {
   workingMemory: WorkingMemory;
   pendingEmailSend: PendingEmailSendAction | null;
   pendingEmailSends: PendingEmailSendAction[];
+  resolvedUserContext: ResolvedUserContext | null;
+}
+
+export type LocationConfidence = "none" | "low" | "medium" | "high";
+export type LocationPrecision =
+  | "unknown"
+  | "timezone_region"
+  | "country"
+  | "state"
+  | "city"
+  | "suburb"
+  | "address";
+export type LocationRole = "home" | "current" | "frequent" | "regional";
+export type AssumptionPolicy = "direct" | "soft_assumption" | "clarify";
+
+export interface ResolvedLocationContext {
+  label: string;
+  role: LocationRole;
+  precision: LocationPrecision;
+  confidence: LocationConfidence;
+  source: "memory" | "profile" | "timezone";
+  explicitness: "explicit" | "inferred" | "fallback";
+  memoryId: number | null;
+  lastUpdatedAt: string | null;
+}
+
+export interface ResolvedUserContext {
+  homeLocation: ResolvedLocationContext | null;
+  currentLocation: ResolvedLocationContext | null;
+  workLocation: ResolvedLocationContext | null;
+  assumedLocation: ResolvedLocationContext | null;
+  assumptionPolicy: AssumptionPolicy;
+  dietaryPreferences: string[];
+  reasons: string[];
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -280,6 +326,8 @@ export interface RememberedUser {
 export interface GeneratedImage {
   url: string;
   prompt: string;
+  /** When true, this is an image edit (Nano Banana Pro 2) — requires user-supplied image URLs */
+  isEdit?: boolean;
 }
 
 export interface RoundTrace {
@@ -371,6 +419,12 @@ export interface ContextSubTimings {
   ragMs: number;
   workingMemoryMs: number;
   formatHistoryMs: number;
+  memoryActiveItemsMs?: number;
+  memorySemanticLookupMs?: number;
+  memoryEmbeddingMs?: number;
+  memoryVectorSearchMs?: number;
+  memoryScoringMs?: number;
+  memorySemanticSkipped?: boolean;
 }
 
 export interface TurnTrace {
@@ -387,7 +441,7 @@ export interface TurnTrace {
   routeDecision: RouteDecision;
   // Option A observability
   classifierResult?: ClassifierResult;
-  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0B-research" | "0B-group" | "0C";
+  routeLayer?: "0A" | "0B-casual" | "0B-knowledge" | "0B-research" | "0B-recall" | "0B-group" | "0C";
   routeReason?: string;
   matchedDisqualifierBucket?: string | null;
   hadPendingState?: boolean;
@@ -403,6 +457,7 @@ export interface TurnTrace {
   historyMessagesCount: number;
   contextBuildLatencyMs: number;
   contextSubTimings: ContextSubTimings | null;
+  resolvedUserContext: ResolvedUserContext | null;
 
   // Agent
   agentName: AgentName;

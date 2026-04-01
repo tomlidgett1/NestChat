@@ -3,6 +3,8 @@ import { activateUser, getUserByToken, updateUserTimezone } from '../_shared/sta
 import { getAdminClient } from '../_shared/supabase.ts';
 import { createChat } from '../_shared/linq.ts';
 import { fetchGrantedScopes, mergeScopes, BASE_SCOPES } from '../_shared/google-scopes.ts';
+import { scheduleEnsureNotificationWebhooksAfterAccountLink } from '../_shared/ensure-notification-webhooks.ts';
+import { internalJsonHeaders } from '../_shared/internal-auth.ts';
 import { enrichByPhone } from '../_shared/pdl.ts';
 import { fetchCalendarTimezone, fetchOutlookTimezone } from '../_shared/calendar-helpers.ts';
 import { getOpenAIClient, MODEL_MAP } from '../_shared/ai/models.ts';
@@ -213,7 +215,7 @@ CRITICAL RULES:
 - Use what you know about their company to make a SPECIFIC, knowing comment. Reference what the company actually does — not just the name. Show you know things.
 - Keep it under 30 words total.
 - No emojis. Australian spelling.
-- The FIRST character of the ENTIRE message MUST be a capital letter. After that, keep it casual and lowercase.
+- Normal sentence case: start every sentence with a capital letter; keep the rest casual (natural lowercase within sentences, not title case). Never begin a sentence with a lowercase letter.
 - Tone: warm, confident, slightly cheeky, like a well-connected mate who knows the industry.
 - Output a SINGLE LINE of text. NO line breaks, NO newlines. Just one flowing sentence or two short sentences on the same line.
 - NEVER say "personal assistant", never pitch features, never use exclamation marks.
@@ -691,6 +693,7 @@ async function upsertAccount(
     if (error) return { error: error.message };
     console.log(`[nest-onboard] Stored Microsoft account ${profile.email} for ${userId}`);
     triggerIngestion(userId).catch((e) => console.warn(`[nest-onboard] ingestion trigger failed: ${(e as Error).message}`));
+    scheduleEnsureNotificationWebhooksAfterAccountLink(userId, null);
     return null;
   }
 
@@ -750,12 +753,12 @@ async function upsertAccount(
   if (error) return { error: error.message };
   console.log(`[nest-onboard] Stored Google account ${profile.email} for ${userId}`);
   triggerIngestion(userId).catch((e) => console.warn(`[nest-onboard] ingestion trigger failed: ${(e as Error).message}`));
+  scheduleEnsureNotificationWebhooksAfterAccountLink(userId, null);
   return null;
 }
 
 async function triggerIngestion(authUserId: string): Promise<void> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
   try {
     const controller = new AbortController();
@@ -763,10 +766,7 @@ async function triggerIngestion(authUserId: string): Promise<void> {
 
     const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: internalJsonHeaders(),
       body: JSON.stringify({
         auth_user_id: authUserId,
         mode: 'full',

@@ -261,8 +261,47 @@ export async function executePoliciedToolCalls(
 
   const sameTurnHasDraft = draftToolsThisBatch.size > 0 || draftInPriorRound;
 
+  // Pre-flight: if email_draft or calendar_write has a name-only recipient and
+  // contacts_read hasn't been called in this batch or prior rounds, redirect
+  // the model to resolve the contact first.
+  const contactsCalledThisTurn = calls.some(c => c.name === "contacts_read") ||
+    (priorTurnToolNames ?? []).includes("contacts_read");
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  const resolvedCalls = calls.map((call) => {
+    if (!contactsCalledThisTurn && (call.name === "email_draft" || call.name === "email_update_draft")) {
+      const toField = call.input.to;
+      const recipients: string[] = Array.isArray(toField)
+        ? toField as string[]
+        : typeof toField === "string" ? [toField] : [];
+      const hasNameOnly = recipients.some(r => !EMAIL_RE.test(r.trim()));
+      if (hasNameOnly && nsSet.has("contacts.read")) {
+        console.log(`[executor] contacts pre-flight: ${call.name} has name-only recipient, redirecting to contacts_read`);
+        return {
+          ...call,
+          _contactsRedirect: true,
+        };
+      }
+    }
+    return call;
+  });
+
   const settled = await Promise.allSettled(
-    calls.map(call => executeSingleCall(call, ctx, nsSet, conversationHistory, sameTurnHasDraft))
+    resolvedCalls.map(call => {
+      if ((call as Record<string, unknown>)._contactsRedirect) {
+        const redirectResult: SingleToolResult = {
+          toolResult: {
+            type: "function_call_output" as const,
+            call_id: call.id,
+            output: "You used a name instead of an email address. Call contacts_read first to resolve the name to an email, then retry email_draft with the resolved address. NEVER guess email addresses.",
+          },
+          execResult: { toolName: call.name, outcome: "blocked" as const, structuredData: { reason: "contacts_not_resolved" } },
+          blocked: { name: call.name, namespace: "email.write", reason: "contacts_not_resolved" as "namespace_denied" },
+        };
+        return Promise.resolve(redirectResult);
+      }
+      return executeSingleCall(call, ctx, nsSet, conversationHistory, sameTurnHasDraft);
+    })
   );
 
   const toolResults: FunctionCallOutput[] = [];

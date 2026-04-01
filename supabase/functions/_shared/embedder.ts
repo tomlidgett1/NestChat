@@ -1,6 +1,6 @@
 // Batch embedder for server-side ingestion pipeline.
-// Processes chunks in optimal batches, respects OpenAI rate limits,
-// and yields progress for job tracking.
+// Processes chunks in optimal batches using OpenAI text-embedding-3-large,
+// respects rate limits, and yields progress for job tracking.
 
 import { getBatchEmbeddings, vectorString } from "./rag-tools.ts";
 
@@ -78,7 +78,7 @@ export async function embedChunks(
 
 /**
  * Truncate text that exceeds the token limit for embeddings.
- * gemini-embedding-2-preview handles ~8192 tokens; we estimate 4 chars/token.
+ * text-embedding-3-large handles ~8191 tokens; we estimate 4 chars/token.
  */
 export function truncateForEmbedding(text: string, maxChars = 30000): string {
   return text.length > maxChars ? text.slice(0, maxChars) : text;

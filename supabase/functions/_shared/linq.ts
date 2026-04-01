@@ -113,7 +113,7 @@ export async function getChat(chatId: string): Promise<ChatInfo> {
   if (cached) return cached;
 
   console.log(`[linq] Fetching chat info for ${chatId}`);
-  const data = await sendRequest<ChatInfo>(`/chats/${chatId}`, { method: 'GET' });
+  const data = await sendRequest<ChatInfo>(`/chats/${encodeURIComponent(chatId)}`, { method: 'GET' });
 
   chatInfoCache.set(chatId, data);
   console.log(`[linq] Chat info cached: ${data.handles.length} participants, is_group=${data.is_group}`);
@@ -302,6 +302,14 @@ export async function normaliseLinqMessage(event: MessageReceivedEvent): Promise
 
 // ─── Create chat (sends initial message) ─────────────────────────────────────
 
+/**
+ * Linq requires a non-empty initial message when creating a chat. Use this when the only
+ * user-visible content will be a voice memo (avoids a separate text bubble before the memo).
+ * iMessage often renders a zero-width space as an empty or minimal bubble; if the API rejects
+ * it, fall back to a single visible character and revisit with Linq support.
+ */
+export const CREATE_CHAT_INVISIBLE_PLACEHOLDER = '\u200B';
+
 export interface LinqCreateChatResponse {
   chat: {
     id: string;
@@ -376,10 +384,30 @@ export async function sendMessage(
   if (effect) message.effect = effect;
   if (replyTo) message.reply_to = replyTo;
 
-  return sendRequest<LinqSendMessageResponse>(`/chats/${chatId}/messages`, {
+  return sendRequest<LinqSendMessageResponse>(`/chats/${encodeURIComponent(chatId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
+  });
+}
+
+/** iMessage voice memo bubble (inline playback) — not a downloadable media attachment. */
+export interface LinqSendVoiceMemoResult {
+  voice_memo: {
+    id: string;
+    status: string;
+    from?: string;
+    to?: string[];
+    created_at?: string;
+    chat?: unknown;
+  };
+}
+
+export async function sendVoiceMemo(chatId: string, voiceMemoUrl: string): Promise<LinqSendVoiceMemoResult> {
+  return sendRequest<LinqSendVoiceMemoResult>(`/chats/${encodeURIComponent(chatId)}/voicememo`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voice_memo_url: voiceMemoUrl }),
   });
 }
 
@@ -416,21 +444,21 @@ export async function sendReaction(
 // ─── Read receipts & typing ──────────────────────────────────────────────────
 
 export async function markAsRead(chatId: string): Promise<void> {
-  await sendRequest(`/chats/${chatId}/read`, { method: 'POST' });
+  await sendRequest(`/chats/${encodeURIComponent(chatId)}/read`, { method: 'POST' });
 }
 
 export async function startTyping(chatId: string): Promise<void> {
-  await sendRequest(`/chats/${chatId}/typing`, { method: 'POST' });
+  await sendRequest(`/chats/${encodeURIComponent(chatId)}/typing`, { method: 'POST' });
 }
 
 export async function stopTyping(chatId: string): Promise<void> {
-  await sendRequest(`/chats/${chatId}/typing`, { method: 'DELETE' });
+  await sendRequest(`/chats/${encodeURIComponent(chatId)}/typing`, { method: 'DELETE' });
 }
 
 // ─── Contact cards ───────────────────────────────────────────────────────────
 
 export async function shareContactCard(chatId: string): Promise<void> {
-  await sendRequest(`/chats/${chatId}/share_contact_card`, { method: 'POST' });
+  await sendRequest(`/chats/${encodeURIComponent(chatId)}/share_contact_card`, { method: 'POST' });
 }
 
 // ─── Sender filtering ────────────────────────────────────────────────────────

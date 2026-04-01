@@ -1,6 +1,9 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
 import { fetchGrantedScopes, mergeScopes, BASE_SCOPES } from '../_shared/google-scopes.ts';
+import { scheduleEnsureNotificationWebhooksAfterAccountLink } from '../_shared/ensure-notification-webhooks.ts';
+import { purgeLinkedAccountData } from '../_shared/purge-linked-account-data.ts';
+import { internalJsonHeaders } from '../_shared/internal-auth.ts';
 
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -173,6 +176,7 @@ async function handleAddCallback(req: Request): Promise<Response> {
     console.log(`[manage-accounts] Linked Google ${profile.email} -> ${original_user_id} (${upsertData?.id})`);
 
     await triggerIngestion(original_user_id);
+    scheduleEnsureNotificationWebhooksAfterAccountLink(original_user_id, null);
 
     return jsonRes({
       success: true,
@@ -281,6 +285,7 @@ async function handleAddMicrosoftCallback(req: Request): Promise<Response> {
     console.log(`[manage-accounts] Linked Microsoft ${email} -> ${original_user_id} (${upsertData?.id})`);
 
     await triggerIngestion(original_user_id);
+    scheduleEnsureNotificationWebhooksAfterAccountLink(original_user_id, null);
 
     return jsonRes({
       success: true,
@@ -375,28 +380,87 @@ async function handleDelete(req: Request, userId: string): Promise<Response> {
         ? 'user_microsoft_accounts'
         : 'user_google_accounts';
 
+    const selectCols =
+      table === 'user_granola_accounts'
+        ? 'id, is_primary, granola_email'
+        : table === 'user_microsoft_accounts'
+          ? 'id, is_primary, microsoft_email'
+          : 'id, is_primary, google_email';
+
     const { data: account } = await admin
       .from(table)
-      .select('id, is_primary')
+      .select(selectCols)
       .eq('id', account_id)
       .eq('user_id', userId)
       .single();
 
     if (!account) return jsonRes({ error: 'not_found' }, 404);
 
-    if (account.is_primary) {
-      const { count: googleCount } = await admin
+    const [
+      { count: googleCount },
+      { count: msCount },
+      { count: granolaCount },
+    ] = await Promise.all([
+      admin
         .from('user_google_accounts')
         .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId);
-      const { count: msCount } = await admin
+        .eq('user_id', userId),
+      admin
         .from('user_microsoft_accounts')
         .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId);
+        .eq('user_id', userId),
+      admin
+        .from('user_granola_accounts')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId),
+    ]);
 
-      if (((googleCount ?? 0) + (msCount ?? 0)) <= 1) {
+    if (account.is_primary) {
+      const totalLinked =
+        (googleCount ?? 0) + (msCount ?? 0) + (granolaCount ?? 0);
+      if (totalLinked <= 1) {
         return jsonRes({ error: 'cannot_remove_last_account' }, 400);
       }
+    }
+
+    const accountEmail =
+      (account as { google_email?: string }).google_email ??
+      (account as { microsoft_email?: string }).microsoft_email ??
+      (account as { granola_email?: string }).granola_email ??
+      '';
+
+    const { data: profile } = await admin
+      .from('user_profiles')
+      .select('handle')
+      .eq('auth_user_id', userId)
+      .maybeSingle();
+    const handle = profile?.handle ?? null;
+
+    if (handle && accountEmail) {
+      const linkedProvider =
+        provider === 'granola'
+          ? 'granola'
+          : provider === 'microsoft'
+            ? 'microsoft'
+            : 'google';
+      const granolaAfterRemoval =
+        linkedProvider === 'granola'
+          ? Math.max(0, (granolaCount ?? 0) - 1)
+          : 0;
+
+      const { errors: purgeErrors } = await purgeLinkedAccountData(admin, {
+        handle,
+        provider: linkedProvider,
+        accountEmail,
+        granolaCountAfterRemoval: granolaAfterRemoval,
+      });
+      if (purgeErrors.length > 0) {
+        console.error('[manage-accounts] purge linked data:', purgeErrors.join('; '));
+      }
+    } else if (!handle) {
+      console.warn(
+        `[manage-accounts] No user_profiles.handle for auth user ${userId}; skipping linked-data purge`,
+      );
     }
 
     const { error: delErr } = await admin
@@ -432,7 +496,6 @@ async function handleDelete(req: Request, userId: string): Promise<Response> {
 
 async function triggerGranolaIngestion(authUserId: string): Promise<void> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
   try {
     const controller = new AbortController();
@@ -440,10 +503,7 @@ async function triggerGranolaIngestion(authUserId: string): Promise<void> {
 
     const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: internalJsonHeaders(),
       body: JSON.stringify({
         auth_user_id: authUserId,
         mode: 'full',
@@ -469,9 +529,8 @@ async function triggerGranolaIngestion(authUserId: string): Promise<void> {
 
 async function triggerIngestion(authUserId: string): Promise<void> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
-  console.log(`[manage-accounts] triggerIngestion called for ${authUserId}, url=${supabaseUrl ? 'set' : 'MISSING'}, key=${serviceRoleKey ? serviceRoleKey.slice(0, 20) + '...' : 'MISSING'}`);
+  console.log(`[manage-accounts] triggerIngestion called for ${authUserId}, url=${supabaseUrl ? 'set' : 'MISSING'}, internal_secret=${Deno.env.get('INTERNAL_EDGE_SHARED_SECRET') ? 'set' : 'MISSING'}`);
 
   try {
     const controller = new AbortController();
@@ -479,10 +538,7 @@ async function triggerIngestion(authUserId: string): Promise<void> {
 
     const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: internalJsonHeaders(),
       body: JSON.stringify({
         auth_user_id: authUserId,
         mode: 'full',

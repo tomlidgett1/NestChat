@@ -8,10 +8,9 @@
 //   activated_at timestamptz NOT NULL DEFAULT now()
 // ═══════════════════════════════════════════════════════════════
 
-import { getBrand, type BrandConfig } from './brand-registry.ts';
+import { getBrandAsync, type BrandConfig } from './brand-registry.ts';
 import { getAdminClient } from './supabase.ts';
 
-const SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const TABLE = 'brand_sessions';
 
 export interface BrandSession {
@@ -21,7 +20,7 @@ export interface BrandSession {
 }
 
 export async function activateBrandSession(chatId: string, brandKey: string): Promise<BrandSession | null> {
-  const brand = getBrand(brandKey);
+  const brand = await getBrandAsync(brandKey);
   if (!brand) return null;
 
   const supabase = getAdminClient();
@@ -50,14 +49,7 @@ export async function getBrandSession(chatId: string): Promise<BrandSession | nu
   if (error || !data) return null;
 
   const activatedAt = new Date(data.activated_at).getTime();
-  if (Date.now() - activatedAt > SESSION_TTL_MS) {
-    // Expired — clean it up
-    await supabase.from(TABLE).delete().eq('chat_id', chatId);
-    console.log(`[brand-session] expired for chat ${chatId}`);
-    return null;
-  }
-
-  const brand = getBrand(data.brand_key);
+  const brand = await getBrandAsync(data.brand_key);
   if (!brand) return null;
 
   return { brandKey: data.brand_key, brand, activatedAt };
@@ -77,13 +69,16 @@ export async function deactivateBrandSession(chatId: string): Promise<void> {
 // Detection helpers
 // ═══════════════════════════════════════════════════════════════
 
-const HEY_BRAND_RE = /^hey\s+(\w+)(?:\s*[:;]-?\))?\s*[!.?]*$/i;
+const HEY_BRAND_RE = /^hey\s+(\w+)(?:\s+(internal))?\b/i;
 
 /**
- * Parse a "Hey [keyword]" activation phrase.
- * Returns the keyword (lowercased) or null if the message doesn't match.
+ * Parse a "Hey [keyword]" or "Hey [keyword] Internal" activation phrase.
+ * "Hey Ash" → "ash", "Hey Ash Internal" → "ash-internal".
  */
 export function parseHeyBrand(text: string): string | null {
   const match = text.trim().match(HEY_BRAND_RE);
-  return match ? match[1].toLowerCase() : null;
+  if (!match) return null;
+  const base = match[1].toLowerCase();
+  const suffix = match[2]?.toLowerCase();
+  return suffix ? `${base}-${suffix}` : base;
 }

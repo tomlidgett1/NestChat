@@ -115,8 +115,8 @@ export async function insertEmbeddedChunks(
           handle,
           document_id: docId,
           embedding: chunk.embeddingStr,
-          embedding_model: "gemini-embedding-2-preview",
-          model_version: "2026-03",
+          embedding_model: "text-embedding-3-large",
+          model_version: "2024-01",
         };
       })
       .filter(Boolean) as Record<string, any>[];
@@ -184,8 +184,8 @@ async function insertSingleChunk(
     handle,
     document_id: docId,
     embedding: chunk.embeddingStr,
-    embedding_model: "gemini-embedding-2-preview",
-    model_version: "2026-03",
+    embedding_model: "text-embedding-3-large",
+    model_version: "2024-01",
   };
 
   const { error: embErr } = await supabase
@@ -219,6 +219,8 @@ export async function bulkDeleteSources(
 
 // ── Bulk check which sources need updating ──────────────────
 
+const CURRENT_EMBEDDING_MODEL = "text-embedding-3-large";
+
 export async function bulkCheckNeedsUpdate(
   supabase: SupabaseClient,
   handle: string,
@@ -231,14 +233,44 @@ export async function bulkCheckNeedsUpdate(
 
   const { data } = await supabase
     .from("search_documents")
-    .select("source_id, content_hash")
+    .select("source_id, content_hash, id")
     .eq("handle", handle)
     .eq("source_type", sourceType)
     .in("source_id", sourceIds);
 
   const existingHashes = new Map<string, string>();
+  const docIds: string[] = [];
   for (const row of data ?? []) {
     existingHashes.set(row.source_id, row.content_hash);
+    docIds.push(row.id);
+  }
+
+  // Also check if existing docs have stale embedding models
+  const staleModelDocIds = new Set<string>();
+  if (docIds.length > 0) {
+    const { data: embData } = await supabase
+      .from("search_embeddings")
+      .select("document_id, embedding_model")
+      .in("document_id", docIds);
+
+    const docHasCurrentModel = new Set<string>();
+    for (const emb of embData ?? []) {
+      if (emb.embedding_model === CURRENT_EMBEDDING_MODEL) {
+        docHasCurrentModel.add(emb.document_id);
+      }
+    }
+
+    for (const docId of docIds) {
+      if (!docHasCurrentModel.has(docId)) {
+        staleModelDocIds.add(docId);
+      }
+    }
+  }
+
+  // Build sourceId→docId map for stale model detection
+  const sourceIdToDocId = new Map<string, string>();
+  for (const row of data ?? []) {
+    sourceIdToDocId.set(row.source_id, row.id);
   }
 
   const needsUpdate = new Set<string>();
@@ -246,6 +278,12 @@ export async function bulkCheckNeedsUpdate(
     const existing = existingHashes.get(item.sourceId);
     if (!existing || existing !== item.contentHash) {
       needsUpdate.add(item.sourceId);
+    } else {
+      // Content unchanged, but check if embedding model is stale
+      const docId = sourceIdToDocId.get(item.sourceId);
+      if (docId && staleModelDocIds.has(docId)) {
+        needsUpdate.add(item.sourceId);
+      }
     }
   }
 

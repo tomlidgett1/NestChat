@@ -22,6 +22,7 @@ import {
   getDeepProfileInstructions,
   getDomainInstructions,
   getTravelInstructions,
+  getWeatherInstructions,
 } from "./domain-instructions.ts";
 import {
   COMPACT_MEMORY_CONTINUITY_LAYER,
@@ -45,7 +46,7 @@ function estimateTokens(text: string): number {
 }
 
 const TOKEN_BUDGET = {
-  memories: 400,
+  memories: 600,
   summaries: 300,
   toolTraces: 100,
 } as const;
@@ -169,8 +170,8 @@ function humaniseScopes(scopes: string[]): string[] {
 // Layer 1: Identity — who Nest is (shared across all agents)
 // ═══════════════════════════════════════════════════════════════
 
-function buildIdentityLayer(agent: AgentConfig, input: TurnInput): string {
-  if (agent.name === "onboard" && input.isOnboarding) {
+function buildIdentityLayer(_agent: AgentConfig, input: TurnInput): string {
+  if (input.isOnboarding) {
     return ONBOARDING_IDENTITY_LAYER;
   }
   return IDENTITY_LAYER;
@@ -202,7 +203,7 @@ function buildConversationBehaviorLayer(input: TurnInput): string {
 
   if (caseStyle === "lowercase") {
     sections.push(
-      "Style cue\nThe user is writing in lowercase. Mirror that unless clarity would genuinely suffer.",
+      "Style cue\nThe user is writing in lowercase. Still use normal sentence case: capitalise the first letter of every sentence and every message bubble. Keep the tone casual — do not mirror all-lowercase in your own messages.",
     );
   } else if (caseStyle === "uppercase") {
     sections.push(
@@ -305,6 +306,73 @@ function findCompactMemoryAnchors(
   return anchors;
 }
 
+function formatResolvedLocation(
+  location: NonNullable<
+    NonNullable<TurnContext["resolvedUserContext"]>["assumedLocation"]
+  >,
+): string {
+  return `${location.label} (${location.role}, ${location.confidence} confidence, ${location.precision})`;
+}
+
+function buildResolvedLocalContextBlock(
+  context: TurnContext,
+  mode: "compact" | "research" | "full",
+): string {
+  const resolved = context.resolvedUserContext;
+  if (!resolved) return "";
+
+  const lines: string[] = [];
+  if (resolved.currentLocation) {
+    lines.push(`Current location: ${formatResolvedLocation(resolved.currentLocation)}`);
+  }
+  if (
+    resolved.homeLocation &&
+    (!resolved.currentLocation ||
+      resolved.homeLocation.label !== resolved.currentLocation.label)
+  ) {
+    lines.push(`Home location: ${formatResolvedLocation(resolved.homeLocation)}`);
+  }
+  if (resolved.workLocation) {
+    lines.push(`Work location: ${formatResolvedLocation(resolved.workLocation)}`);
+  }
+  if (resolved.dietaryPreferences.length > 0) {
+    lines.push(
+      `Dietary preferences: ${resolved.dietaryPreferences.join(", ")}.`,
+    );
+  }
+
+  const policyText = resolved.assumptionPolicy === "direct"
+    ? "use it without asking first"
+    : resolved.assumptionPolicy === "soft_assumption"
+    ? "use it, but phrase it as a light assumption"
+    : "ask before relying on it";
+  if (resolved.assumedLocation) {
+    lines.push(
+      `Assumed location for low-risk local questions: ${resolved.assumedLocation.label}.`,
+    );
+  } else {
+    lines.push("No safe assumed location is available for this prompt.");
+  }
+  lines.push(`Policy: ${resolved.assumptionPolicy} — ${policyText}.`);
+
+  if (mode !== "compact") {
+    lines.push(
+      "For weather, nearby places, opening hours, and local events, use the assumed location above rather than asking where the user is.",
+    );
+    lines.push(
+      "For exact routes, address-specific availability, or jurisdiction-sensitive questions, clarify if the required precision is missing.",
+    );
+    lines.push(
+      "If the user mentions work or the office and a work location exists, use that work location first.",
+    );
+    lines.push(
+      "For food or restaurant recommendations, respect any dietary preferences listed above.",
+    );
+  }
+
+  return `Resolved local context\n${lines.join("\n")}`;
+}
+
 function collectOpenLoops(
   summaries: ConversationSummary[],
   limit: number,
@@ -331,6 +399,15 @@ function resolveUserTimezone(
   context?: TurnContext,
 ): string | null {
   if (input.timezone) return input.timezone;
+  const resolvedLocations = [
+    context?.resolvedUserContext?.currentLocation?.label,
+    context?.resolvedUserContext?.homeLocation?.label,
+    context?.resolvedUserContext?.assumedLocation?.label,
+  ].filter(Boolean) as string[];
+  for (const location of resolvedLocations) {
+    const inferred = inferTimezoneFromLocationLabel(location);
+    if (inferred) return inferred;
+  }
   if (context?.memoryItems?.length) {
     return inferTimezoneFromMemory(context.memoryItems);
   }
@@ -445,6 +522,10 @@ function buildMemoryContinuityLayer(
   );
   if (locationAnchors.length > 0) {
     cues.push(`Location anchors: ${locationAnchors.join(" | ")}`);
+  } else if (context.resolvedUserContext?.assumedLocation) {
+    cues.push(
+      `Location anchors: ${context.resolvedUserContext.assumedLocation.label}`,
+    );
   }
 
   const workAnchors = findMemoryAnchors(
@@ -529,6 +610,14 @@ function buildContextLayer(context: TurnContext, input: TurnInput): string {
         );
       }
     }
+  }
+
+  const resolvedLocalContextBlock = buildResolvedLocalContextBlock(
+    context,
+    "full",
+  );
+  if (resolvedLocalContextBlock) {
+    sections.push(resolvedLocalContextBlock);
   }
 
   // Connected accounts
@@ -734,6 +823,14 @@ const LOCATION_TZ_MAP: Record<string, string> = {
   "mexico": "America/Mexico_City",
 };
 
+function inferTimezoneFromLocationLabel(locationLabel: string): string | null {
+  const val = locationLabel.toLowerCase().trim();
+  for (const [key, tz] of Object.entries(LOCATION_TZ_MAP)) {
+    if (val.includes(key)) return tz;
+  }
+  return null;
+}
+
 function inferTimezoneFromMemory(memoryItems: MemoryItem[]): string | null {
   const locationCategories = [
     "location",
@@ -747,10 +844,8 @@ function inferTimezoneFromMemory(memoryItems: MemoryItem[]): string | null {
   for (const item of memoryItems) {
     const cat = item.category.toLowerCase();
     if (!locationCategories.some((lc) => cat.includes(lc))) continue;
-    const val = item.valueText.toLowerCase().trim();
-    for (const [key, tz] of Object.entries(LOCATION_TZ_MAP)) {
-      if (val.includes(key)) return tz;
-    }
+    const inferred = inferTimezoneFromLocationLabel(item.valueText);
+    if (inferred) return inferred;
   }
   return null;
 }
@@ -814,7 +909,7 @@ function buildTurnLayer(input: TurnInput, context?: TurnContext): string {
       ? `"${input.chatName}"`
       : "an unnamed group";
     sections.push(
-      `Group Chat Context\nYou're in a group chat called ${chatName} with these participants: ${participants}\n\nIn group chats: address people by name when responding to them specifically. Be aware others can see your responses. Keep responses even shorter since group chats move fast. Dont react as often in groups, it can feel spammy.\n\nWhen the group is busy (multiple people chatting), your reply is automatically sent as a threaded reply to the message that triggered you. The recipient already sees which message you're responding to, so don't re-quote or re-reference it — just respond directly.`,
+      `Group Chat Context\nYou're in a group chat called ${chatName} with these participants: ${participants}\n\nIn group chats: address people by name when responding to them specifically. Be aware others can see your responses. Keep responses even shorter since group chats move fast. Dont react as often in groups, it can feel spammy.\n\nWhen the group is busy (multiple people chatting), your reply is automatically sent as a threaded reply to the message that triggered you. The recipient already sees which message you're responding to, so don't re-quote or re-reference it; just respond directly.`,
     );
   }
 
@@ -860,60 +955,46 @@ function buildEntryStateStrategy(
     emotionalLoad: string;
     needsClarification: boolean;
   },
-  experimentVariants: Record<string, string>,
+  _experimentVariants: Record<string, string>,
 ): string {
-  const nameVariant = experimentVariants["name_first_vs_value_first"] ??
-    "value_first";
   let strategy = "";
 
   switch (classification.entryState) {
     case "direct_task_opener":
       strategy =
-        `ENTRY STATE: Direct task. They want help with something specific.
-STRATEGY: Help them IMMEDIATELY. No intro. No name ask. Just handle it.
-After completing the task, casually mention who you are: "by the way, I'm Nest. What should I call you?"
-WEDGE: offload`;
+        `ENTRY STATE: Direct task.
+STRATEGY: Help them immediately. No preamble.`;
       break;
     case "drafting_opener":
       strategy =
-        `ENTRY STATE: Drafting request. They want help writing something.
-STRATEGY: Ask 1-2 focused questions ONLY if needed (who's it for, what tone). Then deliver a usable draft. After, offer one helpful adjacent action.
-WEDGE: draft`;
+        `ENTRY STATE: Drafting request.
+STRATEGY: Ask 1-2 focused questions ONLY if genuinely needed (who's it for, what tone). Then deliver a usable draft.`;
       break;
     case "overwhelm_opener":
-      strategy = `ENTRY STATE: Overwhelm. They're stressed or swamped.
-STRATEGY: Acknowledge first. Keep it real: "I hear you" or "let's sort this out." Then ask for the top 3 things on their mind. Structure it back to them clearly. Offer to track items.
-Do NOT ask for their name. Help first.
-WEDGE: organise`;
+      strategy = `ENTRY STATE: Overwhelm. They're stressed.
+STRATEGY: Acknowledge briefly and genuinely. Then help them structure what's on their mind.`;
       break;
     case "referral_opener":
       strategy = `ENTRY STATE: Referral. Someone told them about you.
-STRATEGY: Acknowledge warmly ("love that"). Keep it brief. ${
-        classification.shouldAskName ? "Ask their name." : ""
-      } Then extract: ask one curious question to learn something real about them ("what's keeping you busy at the moment?" or "what's the thing you keep meaning to sort out?"). Once they answer, show value against that specific thing.
-WEDGE: ask_plan`;
+STRATEGY: Acknowledge warmly and briefly. Let them lead. If they don't have a task, just be easy to talk to.`;
       break;
     case "trust_opener":
       strategy =
-        `ENTRY STATE: Trust/skepticism. They want to know who you are or if this is legit.
-STRATEGY: Be brief and reassuring. "I'm Nest. I keep things simple and low-noise. You can use me when you need me, ignore me when you don't." Then steer toward extraction: ask one question that gets them to share something real so you can demonstrate value contextually.
-Do NOT be defensive. Do NOT use policy language. Do NOT mention technology, models, or infrastructure. NEVER say you are AI or a bot.
+        `ENTRY STATE: Trust/skepticism. They want to know who you are.
+STRATEGY: One confident, brief line about who you are. Don't over-explain or get defensive. Let your next reply prove it.
 ${
           classification.includeTrustReassurance
-            ? "Include a trust reassurance line."
+            ? "Include a brief trust reassurance if it fits naturally."
             : ""
-        }
-WEDGE: ask_plan`;
+        }`;
       break;
     case "curious_opener":
       strategy = `ENTRY STATE: Curious opener (hi, hello, what is this).
-STRATEGY: Brief cheeky intro, then extract. Ask ONE intriguing question that pulls something real out of them. Use "tell me something interesting about you" as the default. If they give a generic answer, push back playfully and ask for something genuinely interesting. The goal is to create intrigue and momentum, then show tailored value.
-WEDGE: ask_plan`;
+STRATEGY: Brief cheeky intro. Let them steer the conversation next.`;
       break;
     default:
-      strategy = `ENTRY STATE: Ambiguous. The message is unclear.
-STRATEGY: Be warm and brief. Ask one curious extraction question to learn something real about them. Default to "tell me something interesting about you". Then use their answer to show contextual value.
-WEDGE: ask_plan`;
+      strategy = `ENTRY STATE: Ambiguous.
+STRATEGY: Be warm, brief, and easy to talk to. Respond to what they actually said.`;
   }
 
   if (
@@ -924,12 +1005,12 @@ WEDGE: ask_plan`;
       classification.emotionalLoad === "high"
         ? "very stressed or distressed"
         : "somewhat stressed"
-    }. Acknowledge their emotional state before helping. Emotion before workflow.`;
+    }. Acknowledge their emotional state before anything else.`;
   }
 
   if (classification.needsClarification) {
     strategy +=
-      `\n\nCLARIFICATION NEEDED: The message is unclear. Ask ONE focused clarification question. Do not guess.`;
+      `\n\nCLARIFICATION NEEDED: The message is unclear. Ask ONE focused clarification question.`;
   }
 
   return strategy;
@@ -954,61 +1035,60 @@ function buildOnboardingLayer(input: TurnInput): string {
 
   const sections: string[] = [];
 
-  // Turn-aware question cadence
-  const isStatementTurn = !isFirstMessage && (userTurnNumber % 2 === 0);
+  // Question cadence — keep it natural, not mechanical
   if (isFirstMessage) {
-    sections.push(`## REPLY CONSTRAINT\nYou may ask ONE question in this reply.`);
-  } else if (isStatementTurn) {
-    sections.push(`## REPLY CONSTRAINT — NO QUESTIONS\nThis is turn ${userTurnNumber}. You are FORBIDDEN from including any question marks (?) in your reply. Do not ask anything. Make statements only — react, affirm, observe, deliver value. If you catch yourself writing a "?", delete it and rephrase as a statement. This is a hard rule, not a suggestion.`);
+    sections.push(`## REPLY CONSTRAINT\nYou may ask at most ONE question, and only if it flows naturally from what they said. A statement that lands well is always better than a forced question.`);
   } else {
-    sections.push(`## REPLY CONSTRAINT\nYou may ask at most ONE question in this reply, but only if it genuinely deepens the conversation. A pure statement is preferred. Never ask more than one question.`);
+    sections.push(`## REPLY CONSTRAINT\nDo NOT ask questions unless they flow directly from what the user just said. Never ask unprompted "get to know you" questions like "what's on your plate" or "what's keeping you busy" or "tell me something about yourself." If the conversation is flowing, just keep it flowing. If they ask you something, answer it. If they react positively, match their energy and let them lead. A reply that just lands is better than one that forces a question. Maximum one question per reply, and only when genuinely needed.`);
   }
 
   // ─── Phase-based verification logic ─────────────────────────────────────
-  if (isFirstMessage) {
-    sections.push(`## VERIFICATION (PHASE 1 — FIRST MESSAGE)
-This is the user's very first message. You MUST ask for verification in your first reply.
+  const isVeryFirstMessage = messageCount === 0;
+  if (isVeryFirstMessage) {
+    sections.push(`## FIRST MESSAGE: PURE ENGAGEMENT
+This is the user's very first message to Nest. Do NOT mention verification, links, signing up, or any kind of setup. Zero onboarding friction.
 
-Structure your reply like this:
-1. A sharp, engaging opener that responds to what they actually said (keep it brief and interesting)
-2. Naturally transition into asking them to verify — generate this fresh based on the conversation, don't use a scripted line. It should feel like a casual aside, not a gate.
-3. After the verification ask, add one engaging line or question to keep momentum.
+Your only job is to:
+1. Name yourself as Nest once, naturally in the reply (e.g. "Hey, Nest here" / "I'm Nest," / "Nest.") so it is unmistakably Nest texting back, not a generic service.
+2. Respond to what they actually said: sharp, a little cheeky, genuinely engaging; avoid bland or corporate openers.
+3. Show personality and make them feel like they've found something interesting.
+4. End in a way that makes them want to text back. A confident statement, a light tease, or a playful observation. Do NOT default to ending with a question. If a question fits naturally, fine, but a reply that just lands is stronger than one that interrogates.
 
-The system will automatically append the verification link — do NOT include the URL yourself.
-
-The verification ask should feel like a quick formality woven into the conversation, not a corporate checkpoint. Keep it casual, confident, and contextual to what they just said.`);
+This is a first impression. Make it count. No gates, no asks, just chemistry.
+Never call yourself an assistant, AI, chatbot, bot, or similar. You are Nest. Never use em dashes in your messages.
+Do not mention verification or links on this first reply; the link is only sent when they ask later (or after message 20).`);
   } else if (alreadySentVerification) {
-    sections.push(`## VERIFICATION — ALREADY SENT
-You already asked for verification. Be genuinely helpful — answer questions, give advice, draft things, search the web. Show value and build momentum.
-You do NOT need to mention verification on every message.
-But if they ask about a verification-gated feature (reminders, calendar, email), tell them that specific feature needs verification and put the link in its own separate bubble using --- before it:
-
----
-${onboardUrl}`);
+    sections.push(`## VERIFICATION: LINK MAY ALREADY BE IN THE THREAD
+They may already have the verification link in an earlier bubble. Be genuinely helpful: answer questions, give advice, draft things, search the web.
+Do NOT proactively push verification or links. If they ask how to verify or for the link, the system will append the URL in that reply.
+If they ask about reminders, calendar, or email, explain that needs verification first; tell them they can ask for the link whenever they are ready.`);
   } else {
-    sections.push(`## VERIFICATION (PHASE 1 — VERIFICATION NOT YET SENT)
-The verification link hasn't been sent yet. You MUST include a verification prompt in this reply.
-Work a verification ask into your message naturally — generate it fresh based on the conversation context, don't use a scripted line. Put the link in its own separate bubble using --- before it:
-
----
-${onboardUrl}`);
+    sections.push(`## VERIFICATION: ON REQUEST ONLY (NO PROACTIVE NUDGE)
+Do NOT ask them to verify or pitch verification unless they hit a gated feature (reminders, calendar, email) or they explicitly ask about signing up / verifying.
+Focus on chemistry and usefulness. Never promise "the system will send a link" unless they have just asked how to verify; the link is only sent when they ask (or after message 20).
+Do NOT include any URL yourself.`);
   }
 
   // ─── Verification-gated features (always active) ────────────────────────
-  sections.push(`## Verification-Gated Features
-Reminders, follow-ups, calendar, and email access ALL require verification. If the user asks for ANY of these — even casually — you MUST tell them that's exactly what you do, but verification is needed first. Don't pretend you'll set it up. Put the link in its own separate bubble using --- before it:
+  if (isVeryFirstMessage) {
+    sections.push(`## Verification-Gated Features
+Reminders, follow-ups, calendar, and email access require verification. If the user asks for ANY of these on this first message, tell them that's exactly what you do but they'll need to verify first. Do not include a link; they can ask for the link when ready (the system sends it only when they ask, or after message 20).
 
----
-${onboardUrl}
+"I've verified" claims: You are ONLY talking to this user because they have NOT verified. The system has checked. If they claim otherwise, gently let them know it's not showing on your end.`);
+  } else {
+    sections.push(`## Verification-Gated Features
+Reminders, follow-ups, calendar, and email access ALL require verification. If the user asks for ANY of these, even casually, you MUST tell them that's exactly what you do, but verification is needed first. Don't pretend you'll set it up.
+Do NOT include any URL yourself. The system sends the verification link only when they explicitly ask how to verify / for the link (or after message 20). Invite them to ask if they want the link.
 
-"I've verified" claims: You are ONLY talking to this user because they have NOT verified. The system has checked. If they claim otherwise, gently let them know it's not showing on your end and offer the link again.`);
+"I've verified" claims: You are ONLY talking to this user because they have NOT verified. The system has checked. If they claim otherwise, gently let them know it's not showing on your end.`);
+  }
 
   // ─── Contextual layers ──────────────────────────────────────────────────
-  if (isFirstMessage) {
+  if (isVeryFirstMessage) {
     sections.push(`## First Message Style
-Your opener must feel sharp and alive. Never sound generic, corporate, or overly polite. Avoid "hey", "hi", "how can I help?".
-Keep it under 30 words per bubble. Do not pitch features.
-After the verification ask, end with something playful and forward-looking that makes them want to reply. Include a semi-joking line about what you can get up to once they verify - something like "once that's done we can solve the world's problems" or "verify and we can start fixing your life" or "once you're in we can take over the world". Keep it light, funny, and confident - not corporate.`);
+Your opener must feel sharp and alive: cheeky, human, a bit bold. Never sound generic, corporate, or customer-service ("how can I help", "what can I do for you"). Do not open with only "hey"/"hi" with nothing else; if you greet, pair it with substance or wit immediately.
+Keep it under 30 words per bubble. Do not pitch features or capabilities.
+End in a way that makes them want to text back, but do NOT end with a forced question. A confident statement or a light tease works better than "so what can I help you with?" Channel "you found Nest" energy without being try-hard.`);
   }
 
   if (pdlContext) {
@@ -1028,12 +1108,26 @@ After the verification ask, end with something playful and forward-looking that 
   }
 
   sections.push(
-    `Rescue Logic\nIf the user seems stuck or unsure what to do, suggest:\n"You can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it"`,
+    `Rescue Logic\nIf the user seems genuinely stuck or asks what you can do, give ONE concrete example relevant to the conversation so far. Never list capabilities unprompted. Never pitch.`,
   );
 
   sections.push(
-    `Verification Link Formatting\nFRAMING: Never say "connect your Google account" or "create an account." Frame it as "quick verification", "verify you're human", or "unlock the full experience".\nFORMAT: The link MUST ALWAYS go in its own separate bubble — never in the same message as other text. Use --- before the link to force a bubble split. Never embed the link inline with other words.`,
+    `Verification Framing\nNever say "connect your Google account" or "create an account." Frame it as "quick verification", "verify you're human", or "unlock the full experience". Never include any URL or link in your message. Do not say a link is being sent unless they have asked for it; the system appends the link only when they ask (or after message 20).`,
   );
+
+  sections.push(`## Hard Limits (NEVER possible, even after verification)
+BOOKING: Cannot book flights, hotels, restaurants, or appointments. Can find options and help compare.
+CALLING: Cannot make or receive phone calls. Can help draft a message or find a number.
+REAL-TIME MONITORING: Cannot watch for events or trigger alerts. Can search for the latest info right now.
+PURCHASES: Cannot buy anything or process payments.
+Never promise a capability you don't have. Never imply future capability. Redirect to what you CAN do.`);
+
+  sections.push(`## Edge Cases
+If they say no or "not interested" or "stop": back off gracefully.
+If they swear: match their energy naturally.
+If they ask if you're a bot or AI: "I'm Nest. Try me with something and see." (Never expand into assistant/AI framing.)
+If they ask what you cost: "don't worry about that right now, just try me out"
+If they ask about privacy: "your messages are encrypted and I don't share your data with anyone. you're in control, ask me to forget anything anytime"`);
 
   return sections.join("\n\n");
 }
@@ -1066,6 +1160,14 @@ export function composeCompactPrompt(
   const compactAnchors = findCompactMemoryAnchors(context, 3);
   if (compactAnchors.length > 0) {
     sections.push(`Relevant personal context\n${compactAnchors.join("\n")}`);
+  }
+
+  const compactResolvedContext = buildResolvedLocalContextBlock(
+    context,
+    "compact",
+  );
+  if (compactResolvedContext) {
+    sections.push(compactResolvedContext);
   }
 
   const compactOpenLoops = collectOpenLoops(context.summaries, 1);
@@ -1170,6 +1272,19 @@ export function composeResearchLitePrompt(
     sections.push(`User handle: ${input.senderHandle}`);
   }
 
+  const compactAnchors = findCompactMemoryAnchors(context, 3);
+  if (compactAnchors.length > 0) {
+    sections.push(`Relevant personal context\n${compactAnchors.join("\n")}`);
+  }
+
+  const resolvedLocalContext = buildResolvedLocalContextBlock(
+    context,
+    "research",
+  );
+  if (resolvedLocalContext) {
+    sections.push(resolvedLocalContext);
+  }
+
   if (context.connectedAccounts.length > 0) {
     let acctBlock = `Connected accounts`;
     for (const acct of context.connectedAccounts) {
@@ -1240,6 +1355,10 @@ function buildDomainLayers(
     sections.push(getTravelInstructions());
   }
 
+  if (capabilities?.includes("weather.search")) {
+    sections.push(getWeatherInstructions());
+  }
+
   if (secondaryDomains && secondaryDomains.length > 0) {
     const auxBlocks = secondaryDomains
       .filter((d) => d !== primaryDomain)
@@ -1287,6 +1406,14 @@ export function composePrompt(
     agent.toolPolicy?.allowedNamespaces?.includes("travel.search")
   ) {
     layers.push(getTravelInstructions());
+  }
+
+  // Inject weather instructions for non-smart agents that have weather tools
+  if (
+    agent.name !== "smart" &&
+    agent.toolPolicy?.allowedNamespaces?.includes("weather.search")
+  ) {
+    layers.push(getWeatherInstructions());
   }
 
   layers.push(buildContextLayer(context, input));

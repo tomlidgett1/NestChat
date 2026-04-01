@@ -55,7 +55,8 @@ function makeContext(overrides?: {
 interface TestCase {
   name: string;
   message: string;
-  expectedLane: '0A' | '0B-casual' | '0B-knowledge' | '0C';
+  expectedLane: '0A' | '0B-casual' | '0B-knowledge' | '0B-research' | '0B-recall' | '0C';
+  expectedMemoryDepth?: 'none' | 'light' | 'full';
   context?: Parameters<typeof makeContext>[0];
 }
 
@@ -89,7 +90,7 @@ const tests: TestCase[] = [
   { name: 'L2: how do trains work', message: 'how do trains work', expectedLane: '0B-knowledge' },
   { name: 'L3: what is a standup meeting', message: 'what is a standup meeting', expectedLane: '0C' },
   { name: 'L3: meeting culture in Japan', message: 'tell me about meeting culture in Japan', expectedLane: '0C' },
-  { name: 'L2: how should I reply politely', message: 'how should I reply politely', expectedLane: '0B-knowledge' },
+  { name: 'L2: how should I reply politely', message: 'how should I reply politely', expectedLane: '0C' },
   { name: 'L2: summarise this paragraph', message: 'summarise this paragraph', expectedLane: '0B-knowledge' },
   { name: 'L2: trams in Melbourne history', message: 'tell me about trams in Melbourne history', expectedLane: '0B-knowledge' },
   { name: 'L2: best programming languages', message: 'what are the best programming languages', expectedLane: '0B-knowledge' },
@@ -128,19 +129,21 @@ const tests: TestCase[] = [
 
   // ── Lane 3: Classifier (disqualifier: temporal signals) ──────
   { name: 'L3: whats on tomorrow', message: "what's on tomorrow", expectedLane: '0C' },
-  { name: 'L3: weather today', message: 'weather today', expectedLane: '0C' },
+  { name: 'L3: weather today', message: 'weather today', expectedLane: '0B-research', expectedMemoryDepth: 'light' },
   { name: 'L3: latest OpenAI pricing', message: 'latest OpenAI pricing', expectedLane: '0C' },
-  { name: 'L3: who won tonight', message: 'who won tonight', expectedLane: '0C' },
+  { name: 'L3: who won tonight', message: 'who won tonight', expectedLane: '0B-research', expectedMemoryDepth: 'none' },
   { name: 'L3: free after 3pm', message: 'free after 3pm', expectedLane: '0C' },
   { name: 'L3: this weekend plans', message: 'this weekend plans', expectedLane: '0C' },
-  { name: 'L3: whats happening next week', message: "what's happening next week", expectedLane: '0C' },
+  { name: 'L3: whats happening next week', message: "what's happening next week", expectedLane: '0B-research', expectedMemoryDepth: 'none' },
 
   // ── Lane 3: Classifier (disqualifier: local/travel) ──────────
-  { name: 'L3: best sushi near me', message: 'best sushi near me', expectedLane: '0C' },
+  { name: 'L3: best sushi near me', message: 'best sushi near me', expectedLane: '0B-research', expectedMemoryDepth: 'light' },
+  { name: 'L3: good lunch near my office', message: 'good lunch near my office', expectedLane: '0B-research', expectedMemoryDepth: 'light' },
   { name: 'L3: how long to get from Kyoto to Osaka', message: 'how long to get from Kyoto to Osaka', expectedLane: '0C' },
   { name: 'L3: directions to the station', message: 'directions to the station', expectedLane: '0C' },
   { name: 'L3: train from Tokyo to Kyoto', message: 'train from Tokyo to Kyoto', expectedLane: '0C' },
-  { name: 'L3: nearest pharmacy', message: 'nearest pharmacy', expectedLane: '0C' },
+  { name: 'L3: nearest pharmacy', message: 'nearest pharmacy', expectedLane: '0B-research', expectedMemoryDepth: 'light' },
+  { name: 'L3: can Uber Eats deliver here', message: 'Can Uber Eats deliver here?', expectedLane: '0B-research', expectedMemoryDepth: 'light' },
   { name: 'L3: walk to the office', message: 'walk to the office', expectedLane: '0C' },
   { name: 'L3: drive to the airport', message: 'drive to the airport', expectedLane: '0C' },
 
@@ -151,16 +154,16 @@ const tests: TestCase[] = [
   { name: 'L3: whats in my inbox', message: "what's in my inbox", expectedLane: '0C' },
 
   // ── Lane 3: Classifier (disqualifier: personal recall) ────────
-  { name: 'L3: how many goals did I kick', message: 'How many goals did I kick in my last game', expectedLane: '0C' },
-  { name: 'L3: what did I eat yesterday', message: 'what did I eat yesterday', expectedLane: '0C' },
-  { name: 'L3: when did I last see Dave', message: 'when did I last see Dave', expectedLane: '0C' },
-  { name: 'L3: where did we go for dinner', message: 'where did we go for dinner', expectedLane: '0C' },
-  { name: 'L3: who did I meet with', message: 'who did I meet with last week', expectedLane: '0C' },
-  { name: 'L3: did I ever tell you about', message: 'did I ever tell you about my trip', expectedLane: '0C' },
-  { name: 'L3: do you remember', message: 'do you remember what I said about that', expectedLane: '0C' },
-  { name: 'L3: try again + recall', message: 'Try again: How many goals did I kick in my last game', expectedLane: '0C' },
-  { name: 'L3: how many km did we run', message: 'how many km did we run on Saturday', expectedLane: '0C' },
-  { name: 'L3: what did I say about', message: 'what did I say about the project', expectedLane: '0C' },
+  { name: 'L3: how many goals did I kick', message: 'How many goals did I kick in my last game', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: what did I eat yesterday', message: 'what did I eat yesterday', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: when did I last see Dave', message: 'when did I last see Dave', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: where did we go for dinner', message: 'where did we go for dinner', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: who did I meet with', message: 'who did I meet with last week', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: did I ever tell you about', message: 'did I ever tell you about my trip', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: do you remember', message: 'do you remember what I said about that', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: try again + recall', message: 'Try again: How many goals did I kick in my last game', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: how many km did we run', message: 'how many km did we run on Saturday', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
+  { name: 'L3: what did I say about', message: 'what did I say about the project', expectedLane: '0B-recall', expectedMemoryDepth: 'full' },
 
   // ── Lane 3: Classifier (pending email + non-confirmation escapes Layer 0A) ──
   {
@@ -212,7 +215,7 @@ const tests: TestCase[] = [
   {
     name: 'L3: yeah pease (after places_search)',
     message: 'Yeah pease',
-    expectedLane: '0C',
+    expectedLane: '0B-knowledge',
     context: {
       recentTurns: [
         { role: 'assistant', content: 'Ashburton Cycles is solid. Need their hours? [places_search]' },
@@ -222,7 +225,7 @@ const tests: TestCase[] = [
   {
     name: 'L3: nice (after email_read)',
     message: 'nice',
-    expectedLane: '0C',
+    expectedLane: '0B-casual',
     context: {
       recentTurns: [
         { role: 'assistant', content: 'Here are your latest emails [email_read]' },
@@ -232,7 +235,7 @@ const tests: TestCase[] = [
   {
     name: 'L3: ok (after calendar_read)',
     message: 'ok',
-    expectedLane: '0C',
+    expectedLane: '0B-casual',
     context: {
       recentTurns: [
         { role: 'assistant', content: 'Your schedule for today [calendar_read]' },
@@ -242,7 +245,7 @@ const tests: TestCase[] = [
   {
     name: 'L3: tell me about Japan (after travel_time)',
     message: 'tell me about Japan',
-    expectedLane: '0C',
+    expectedLane: '0B-knowledge',
     context: {
       recentTurns: [
         { role: 'assistant', content: 'The trip takes about 2 hours [travel_time]' },
@@ -270,13 +273,18 @@ for (const tc of tests) {
   try {
     const route = await routeTurnV2(input, ctx);
     const actualLane = route.routeLayer ?? 'unknown';
+    const actualMemoryDepth = route.memoryDepth ?? 'none';
+    const laneMatches = actualLane === tc.expectedLane;
+    const depthMatches = tc.expectedMemoryDepth === undefined ||
+      actualMemoryDepth === tc.expectedMemoryDepth;
 
-    if (actualLane === tc.expectedLane) {
+    if (laneMatches && depthMatches) {
       passed++;
-      console.log(`  ✅ ${tc.name} → ${actualLane} (reason: ${route.routeReason ?? 'n/a'})`);
+      console.log(`  ✅ ${tc.name} → ${actualLane}/${actualMemoryDepth} (reason: ${route.routeReason ?? 'n/a'})`);
     } else {
       failed++;
-      const detail = `expected ${tc.expectedLane}, got ${actualLane} (reason: ${route.routeReason ?? 'n/a'})`;
+      const expectedDepth = tc.expectedMemoryDepth ? `/${tc.expectedMemoryDepth}` : '';
+      const detail = `expected ${tc.expectedLane}${expectedDepth}, got ${actualLane}/${actualMemoryDepth} (reason: ${route.routeReason ?? 'n/a'})`;
       failures.push(`${tc.name}: ${detail}`);
       console.log(`  ❌ ${tc.name} → ${detail}`);
     }
@@ -311,10 +319,14 @@ if (failures.length > 0) {
 
 const lane1Tests = tests.filter(t => t.expectedLane === '0B-casual').length;
 const lane2Tests = tests.filter(t => t.expectedLane === '0B-knowledge').length;
+const laneResearchTests = tests.filter(t => t.expectedLane === '0B-research').length;
+const laneRecallTests = tests.filter(t => t.expectedLane === '0B-recall').length;
 const lane3Tests = tests.filter(t => t.expectedLane === '0C').length;
 console.log(`\nLane distribution:`);
 console.log(`  Lane 1 (casual):     ${lane1Tests} tests`);
 console.log(`  Lane 2 (knowledge):  ${lane2Tests} tests`);
+console.log(`  Lane 2.5 (research): ${laneResearchTests} tests`);
+console.log(`  Lane 2.6 (recall):   ${laneRecallTests} tests`);
 console.log(`  Lane 3 (classifier): ${lane3Tests} tests`);
 console.log(`  Total:               ${tests.length} tests`);
 

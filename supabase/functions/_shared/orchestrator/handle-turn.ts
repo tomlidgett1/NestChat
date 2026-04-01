@@ -8,6 +8,7 @@ import {
 } from "./build-context.ts";
 import { routeTurn } from "./route-turn.ts";
 import { routeTurnV2 } from "./route-turn-v2.ts";
+import { routeTurnLlm } from "./route-turn-llm.ts";
 import { selectAgent } from "./select-agent.ts";
 import { runAgentLoop } from "./run-agent-loop.ts";
 import { persistTurn } from "./persist-turn.ts";
@@ -20,6 +21,9 @@ import {
   shouldQueueBackgroundWork,
 } from "./background-jobs.ts";
 import { OPTION_A_ROUTING } from "../env.ts";
+import { applyCompareRouteOverride } from "./compare-route-override.ts";
+import type { UserProfile } from "../state.ts";
+import { logAgentTurnCost } from "../cost-tracker.ts";
 
 // ═══════════════════════════════════════════════════════════════
 // Slash command handling (deterministic, no LLM needed)
@@ -57,6 +61,7 @@ async function handleSlashCommand(
     historyMessagesCount: 0,
     contextBuildLatencyMs: 0,
     contextSubTimings: null,
+    resolvedUserContext: null,
     agentName: "casual",
     modelUsed: "none",
     agentLoopRounds: 0,
@@ -265,10 +270,59 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     // Option A: v2 routing (classifier-based, 2-agent model)
     const routerCtxStart = Date.now();
     routerCtx = await buildRouterContext(input);
+
+    if (input.senderHandle) {
+      const { extractUserContextPatch, mergeUserContextProfile } = await import(
+        "../user-context.ts"
+      );
+      const patch = extractUserContextPatch(input.userMessage);
+      if (patch) {
+        const mergedContextProfile = mergeUserContextProfile(
+          routerCtx.preloadedProfile?.contextProfile ?? null,
+          patch,
+        );
+
+        const baseProfile = routerCtx.preloadedProfile ?? {
+          handle: input.senderHandle,
+          name: null,
+          facts: [],
+          useLinq: false,
+          firstSeen: 0,
+          lastSeen: 0,
+          deepProfileSnapshot: null,
+          deepProfileBuiltAt: null,
+          contextProfile: null,
+          testRouteLlm: false,
+        } satisfies UserProfile;
+
+        routerCtx.preloadedProfile = {
+          ...baseProfile,
+          contextProfile: mergedContextProfile,
+        };
+
+        import("../state.ts")
+          .then(({ updateUserContextProfile }) =>
+            updateUserContextProfile(input.senderHandle, mergedContextProfile)
+          )
+          .catch((err) =>
+            console.warn(
+              "[handle-turn] updateUserContextProfile failed:",
+              (err as Error).message,
+            )
+          );
+      }
+    }
+
     routerContextMs = Date.now() - routerCtxStart;
 
+    const useTestRouter = routerCtx.preloadedProfile?.testRouteLlm === true;
     const routeStart = Date.now();
-    route = await routeTurnV2(input, routerCtx);
+    if (useTestRouter) {
+      console.log(`[handle-turn] test_route_llm=true for ${input.senderHandle} — using 100% LLM router`);
+      route = await routeTurnLlm(input, routerCtx);
+    } else {
+      route = await routeTurnV2(input, routerCtx);
+    }
     routeMs = Date.now() - routeStart;
   } else {
     // Legacy: try instant fast-path BEFORE fetching any context
@@ -289,7 +343,22 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     }
   }
 
+  route = applyCompareRouteOverride(input, route);
+
   // 3. Build context — select path based on group/memoryDepth/heuristics
+  // Voice mode override: force smart agent with proper reasoning so the
+  // voice instructions are actually followed. Lite/fast models with zero
+  // reasoning buried at the end of a 30K prompt ignore voice formatting.
+  if (input.voiceMode && route.agent === "chat") {
+    console.log(`[handle-turn] voice mode: upgrading chat→smart, reasoning→medium`);
+    route = {
+      ...route,
+      agent: "smart",
+      reasoningEffortOverride: route.reasoningEffortOverride ?? "medium",
+      memoryDepth: route.memoryDepth === "none" ? "light" : route.memoryDepth,
+    };
+  }
+
   const contextStart = Date.now();
   let useLightContext: boolean;
   let contextPath: "full" | "light" | "memory-light" | "group";
@@ -322,13 +391,14 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     contextPath = useLightContext ? "light" : "full";
   }
 
+  const recallHistoryLimit = route.primaryDomain === "recall" ? 50 : undefined;
   const context = contextPath === "group"
     ? await buildGroupContext(input)
     : contextPath === "light"
     ? await buildLightContext(input, routerCtx)
     : contextPath === "memory-light"
     ? await buildMemoryLightContext(input, routerCtx)
-    : await buildContext(input, routerCtx);
+    : await buildContext(input, routerCtx, recallHistoryLimit ? { historyLimit: recallHistoryLimit } : undefined);
   const contextBuildLatencyMs = Date.now() - contextStart;
   if (useLightContext) {
     console.log(
@@ -339,7 +409,8 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
   // 5. Select agent
   const agent = selectAgent(route.agent);
 
-  // 6. Run agent loop
+  // 6. Run agent loop — input.modelOverride (from admin compare page) takes priority
+  const effectiveModelOverride = input.modelOverride ?? route.modelOverride;
   const loopStart = Date.now();
   const loopResult = await runAgentLoop(
     agent,
@@ -352,7 +423,7 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     route.secondaryDomains,
     route.reasoningEffortOverride,
     route.classifierResult?.requiredCapabilities,
-    route.modelOverride,
+    effectiveModelOverride,
     route.routeLayer,
   );
   const agentLoopLatencyMs = Date.now() - loopStart;
@@ -399,6 +470,7 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     historyMessagesCount: context.history.length,
     contextBuildLatencyMs,
     contextSubTimings: context.subTimings ?? null,
+    resolvedUserContext: context.resolvedUserContext,
 
     agentName: agent.name,
     modelUsed: loopResult.effectiveModel,
@@ -430,6 +502,7 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
       draftIdPresent: !!context.pendingEmailSend?.draftId,
       accountPresent: !!context.pendingEmailSend?.account,
       confirmationResult: route.confirmationState ?? "not_checked",
+      voiceModeDetected: input.voiceMode === true,
     },
 
     systemPrompt: loopResult.systemPrompt,
@@ -448,6 +521,33 @@ export async function handleTurn(input: TurnInput): Promise<TurnResult> {
     .catch((err) =>
       console.warn("[handle-turn] persistTurn failed:", (err as Error).message)
     );
+
+  // 8b. Log API cost (fire-and-forget)
+  const messageType = input.voiceMode
+    ? (input.isGroupChat ? "group_voice" : "voice")
+    : input.isProactiveReply
+    ? "proactive"
+    : input.isGroupChat
+    ? "group_text"
+    : "text";
+
+  import("../supabase.ts").then(({ getAdminClient }) => {
+    logAgentTurnCost(getAdminClient(), {
+      userId: input.authUserId,
+      chatId: input.chatId,
+      senderHandle: input.senderHandle,
+      agentName: agent.name,
+      model: loopResult.effectiveModel,
+      messageType,
+      totalInputTokens: loopResult.inputTokens,
+      totalOutputTokens: loopResult.outputTokens,
+      totalLatencyMs: agentLoopLatencyMs,
+      rounds: loopResult.rounds,
+      toolsUsed: loopResult.toolsUsed.map((t) => t.tool),
+    }).catch((err) =>
+      console.warn("[handle-turn] cost logging failed:", (err as Error).message)
+    );
+  });
 
   // 9-10. Skip background jobs and working memory for group chats (privacy)
   if (!input.isGroupChat) {

@@ -53,6 +53,10 @@ export const SEARCH_EMBEDDINGS_TABLE = getOptionalEnv('SEARCH_EMBEDDINGS_TABLE')
 export const GROUP_CHATS_TABLE = getOptionalEnv('GROUP_CHATS_TABLE') || 'group_chats';
 export const GROUP_CHAT_MEMBERS_TABLE = getOptionalEnv('GROUP_CHAT_MEMBERS_TABLE') || 'group_chat_members';
 
+export const NOTIFICATION_WEBHOOK_SUBSCRIPTIONS_TABLE = getOptionalEnv('NOTIFICATION_WEBHOOK_SUBSCRIPTIONS_TABLE') || 'notification_webhook_subscriptions';
+export const NOTIFICATION_WEBHOOK_EVENTS_TABLE = getOptionalEnv('NOTIFICATION_WEBHOOK_EVENTS_TABLE') || 'notification_webhook_events';
+export const NOTIFICATION_WATCH_TRIGGERS_TABLE = getOptionalEnv('NOTIFICATION_WATCH_TRIGGERS_TABLE') || 'notification_watch_triggers';
+
 export const MEMORY_V2_ENABLED = (getOptionalEnv('MEMORY_V2_ENABLED') || 'true') === 'true';
 export const EXTRACTOR_VERSION = getOptionalEnv('MEMORY_EXTRACTOR_VERSION') || 'v2.0';
 

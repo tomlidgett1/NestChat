@@ -11,26 +11,28 @@ const CAPABILITY_TO_NAMESPACES: Record<Capability, ToolNamespace[]> = {
   'knowledge.search': ['knowledge.search'],
   'memory.read': ['memory.read'],
   'memory.write': ['memory.write'],
-  'travel.search': ['travel.search'],
+  'travel.search': ['travel.search', 'memory.read', 'knowledge.search'],
+  'weather.search': ['weather.search'],
   'reminders.manage': ['reminders.manage'],
+  'notifications.watch': ['notifications.watch'],
   'deep_profile': ['memory.read', 'memory.write', 'knowledge.search', 'granola.read', 'email.read', 'calendar.read', 'contacts.read'],
 };
 
 const DOMAIN_BASE_TOOLS: Record<DomainTag, ToolNamespace[]> = {
-  email: ['email.read', 'email.write', 'contacts.read', 'memory.read'],
-  calendar: ['calendar.read', 'calendar.write', 'contacts.read', 'memory.read', 'email.read', 'knowledge.search', 'reminders.manage'],
+  email: ['email.read', 'email.write', 'contacts.read', 'memory.read', 'notifications.watch'],
+  calendar: ['calendar.read', 'calendar.write', 'contacts.read', 'memory.read', 'email.read', 'knowledge.search', 'reminders.manage', 'notifications.watch'],
   meeting_prep: ['calendar.read', 'granola.read', 'email.read', 'contacts.read', 'knowledge.search', 'memory.read', 'web.search'],
-  research: ['web.search', 'knowledge.search', 'contacts.read', 'memory.read', 'travel.search'],
-  recall: ['memory.read', 'knowledge.search', 'granola.read'],
+  research: ['web.search', 'knowledge.search', 'contacts.read', 'memory.read', 'travel.search', 'weather.search'],
+  recall: ['memory.read', 'knowledge.search', 'granola.read', 'calendar.read'],
   contacts: ['contacts.read', 'memory.read'],
   general: [
     'memory.read', 'memory.write', 'email.read', 'email.write',
     'calendar.read', 'calendar.write', 'contacts.read', 'granola.read',
-    'web.search', 'knowledge.search', 'travel.search', 'reminders.manage',
+    'web.search', 'knowledge.search', 'travel.search', 'weather.search', 'reminders.manage', 'notifications.watch',
   ],
 };
 
-const WRITE_CAPABILITIES: Set<string> = new Set(['email.write', 'calendar.write', 'memory.write', 'reminders.manage']);
+const WRITE_CAPABILITIES: Set<string> = new Set(['email.write', 'calendar.write', 'memory.write', 'reminders.manage', 'notifications.watch']);
 const COMPOUND_EXTRAS: ToolNamespace[] = ['contacts.read', 'memory.read'];
 
 const ALWAYS_INCLUDED: ToolNamespace[] = ['messaging.react'];
@@ -54,8 +56,8 @@ export function resolveTools(result: ClassifierResult): ToolNamespace[] {
     }
   }
 
-  if (result.primaryDomain === 'meeting_prep') {
-    const baseDomain = DOMAIN_BASE_TOOLS.meeting_prep;
+  if (result.primaryDomain === 'meeting_prep' || result.primaryDomain === 'recall') {
+    const baseDomain = DOMAIN_BASE_TOOLS[result.primaryDomain];
     for (const ns of baseDomain) nsSet.add(ns);
   } else if (result.confidence < 0.7) {
     const baseDomain = DOMAIN_BASE_TOOLS[result.primaryDomain];
@@ -138,7 +140,9 @@ function namespaceToCap(ns: ToolNamespace): Capability | null {
     'memory.read': 'memory.read',
     'memory.write': 'memory.write',
     'travel.search': 'travel.search',
+    'weather.search': 'weather.search',
     'reminders.manage': 'reminders.manage',
+    'notifications.watch': 'notifications.watch',
   };
   return map[ns] ?? null;
 }

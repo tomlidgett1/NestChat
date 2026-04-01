@@ -73,8 +73,13 @@ function localTimeToUtc(
   target.setUTCHours(hour, minute, 0, 0);
   const utcTarget = new Date(target.getTime() - offsetMs);
 
-  if (!dateOverride && utcTarget <= utcNow) {
-    utcTarget.setUTCDate(utcTarget.getUTCDate() + 1);
+  // The UTC construction above can be off by more than one calendar day; a single
+  // +1 day bump left next_fire_at in the past, so reminder-cron (every minute) kept re-firing.
+  if (!dateOverride) {
+    let guard = 0;
+    while (utcTarget <= utcNow && guard++ < 400) {
+      utcTarget.setUTCDate(utcTarget.getUTCDate() + 1);
+    }
   }
 
   return utcTarget;

@@ -41,6 +41,41 @@ export interface ResolvedToken {
   provider: 'google' | 'microsoft';
 }
 
+export type EmailSearchStatus = 'ok' | 'empty' | 'no_accounts' | 'provider_error';
+
+export interface EmailSearchAccountError {
+  account: string;
+  provider: 'google' | 'microsoft';
+  error: string;
+}
+
+export interface EmailSearchResultRow {
+  message_id: string;
+  thread_id: string;
+  from: string;
+  to: string;
+  cc: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  body_preview: string;
+  has_attachments: boolean;
+  account: string;
+  provider: 'google' | 'microsoft';
+  received_at?: string;
+  received_at_ms?: number;
+  is_important?: boolean;
+}
+
+export interface EmailSearchResponse {
+  results: EmailSearchResultRow[];
+  count: number;
+  status: EmailSearchStatus;
+  message?: string;
+  account_errors?: EmailSearchAccountError[];
+  accounts_checked?: number;
+}
+
 export async function resolveToken(
   userId: string,
   accountEmail?: string,
@@ -316,11 +351,30 @@ export async function sendGmailDraft(
 interface OutlookQueryParts {
   search: string | null;
   filter: string | null;
+  folder: 'inbox' | 'sentitems' | 'drafts' | 'deleteditems' | 'junkemail' | null;
 }
 
 function gmailQueryToOutlook(gmailQuery: string): OutlookQueryParts {
   let remaining = gmailQuery;
   const filters: string[] = [];
+  let folder: OutlookQueryParts['folder'] = null;
+
+  const folderMatch = remaining.match(/\bin:(anywhere|inbox|sent|drafts|trash|spam)\b/i);
+  if (folderMatch) {
+    const rawFolder = folderMatch[1].toLowerCase();
+    folder = rawFolder === 'anywhere'
+      ? null
+      : rawFolder === 'sent'
+      ? 'sentitems'
+      : rawFolder === 'trash'
+      ? 'deleteditems'
+      : rawFolder === 'spam'
+      ? 'junkemail'
+      : rawFolder === 'drafts'
+      ? 'drafts'
+      : 'inbox';
+    remaining = remaining.replace(folderMatch[0], '');
+  }
 
   const newerMatch = remaining.match(/newer_than:(\d+)([dhm])/i);
   if (newerMatch) {
@@ -354,13 +408,25 @@ function gmailQueryToOutlook(gmailQuery: string): OutlookQueryParts {
     remaining = remaining.replace(unreadMatch[0], '');
   }
 
+  const readMatch = remaining.match(/is:read/i);
+  if (readMatch) {
+    filters.push('isRead eq true');
+    remaining = remaining.replace(readMatch[0], '');
+  }
+
+  const importantMatch = remaining.match(/is:important/i);
+  if (importantMatch) {
+    filters.push("importance eq 'high'");
+    remaining = remaining.replace(importantMatch[0], '');
+  }
+
   const attachMatch = remaining.match(/has:attachment/i);
   if (attachMatch) {
     filters.push('hasAttachments eq true');
     remaining = remaining.replace(attachMatch[0], '');
   }
 
-  remaining = remaining.replace(/\b(in:(inbox|sent|drafts|trash|spam)|label:\S+|is:(starred|important|read))\b/gi, '');
+  remaining = remaining.replace(/\b(label:\S+|is:starred)\b/gi, '');
 
   const subjectMatch = remaining.match(/subject:(?:"([^"]+)"|(\S+))/i);
   let searchText = '';
@@ -379,6 +445,7 @@ function gmailQueryToOutlook(gmailQuery: string): OutlookQueryParts {
   return {
     search: searchText.trim() || null,
     filter: filters.length > 0 ? filters.join(' and ') : null,
+    folder,
   };
 }
 
@@ -392,13 +459,16 @@ export async function searchOutlookMessages(
   query: string,
   maxResults: number,
   tz: string,
-): Promise<any[]> {
+): Promise<EmailSearchResultRow[]> {
   const translated = gmailQueryToOutlook(query);
   console.log(`[gmail-helpers] outlook query translation: "${query}" → search=${translated.search}, filter=${translated.filter}`);
+  const basePath = translated.folder
+    ? `${GRAPH_API}/mailFolders/${translated.folder}/messages`
+    : `${GRAPH_API}/messages`;
 
   const params = new URLSearchParams({
     $top: String(maxResults),
-    $select: 'id,conversationId,from,toRecipients,ccRecipients,subject,receivedDateTime,bodyPreview,body,hasAttachments',
+    $select: 'id,conversationId,from,toRecipients,ccRecipients,subject,receivedDateTime,bodyPreview,body,hasAttachments,importance',
   });
 
   if (translated.search) {
@@ -412,7 +482,7 @@ export async function searchOutlookMessages(
   }
 
   const resp = await fetch(
-    `${GRAPH_API}/messages?${params}`,
+    `${basePath}?${params}`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
   if (!resp.ok) {
@@ -423,10 +493,10 @@ export async function searchOutlookMessages(
       const fallbackParams = new URLSearchParams({
         $top: String(maxResults),
         $orderby: 'receivedDateTime desc',
-        $select: 'id,conversationId,from,toRecipients,ccRecipients,subject,receivedDateTime,bodyPreview,body,hasAttachments',
+        $select: 'id,conversationId,from,toRecipients,ccRecipients,subject,receivedDateTime,bodyPreview,body,hasAttachments,importance',
       });
       const fallbackResp = await fetch(
-        `${GRAPH_API}/messages?${fallbackParams}`,
+        `${basePath}?${fallbackParams}`,
         { headers: { Authorization: `Bearer ${accessToken}` } },
       );
       if (!fallbackResp.ok) return [];
@@ -440,12 +510,14 @@ export async function searchOutlookMessages(
   return formatOutlookMessages(data.value ?? [], accountEmail, tz);
 }
 
-function formatOutlookMessages(messages: any[], accountEmail: string, tz: string): any[] {
+function formatOutlookMessages(messages: any[], accountEmail: string, tz: string): EmailSearchResultRow[] {
   return messages.map((m: any) => {
     let dateLocal = m.receivedDateTime ?? '';
+    let receivedAtMs: number | undefined;
     try {
       const parsed = new Date(m.receivedDateTime);
       if (!isNaN(parsed.getTime())) {
+        receivedAtMs = parsed.getTime();
         dateLocal = parsed.toLocaleString('en-AU', {
           weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
           hour: 'numeric', minute: '2-digit', hour12: true,
@@ -470,6 +542,9 @@ function formatOutlookMessages(messages: any[], accountEmail: string, tz: string
       has_attachments: !!m.hasAttachments,
       account: accountEmail,
       provider: 'microsoft',
+      received_at: typeof m.receivedDateTime === 'string' ? m.receivedDateTime : undefined,
+      received_at_ms: receivedAtMs,
+      is_important: String(m.importance ?? '').toLowerCase() === 'high',
     };
   });
 }
@@ -710,10 +785,11 @@ export async function verifyOutlookMessageSent(
 export async function gmailSearchTool(
   userId: string,
   args: Record<string, unknown>,
-): Promise<unknown> {
+): Promise<EmailSearchResponse> {
   const maxResults = Math.min((args.max_results as number) ?? 10, 20);
   const searchTz = (args.time_zone as string) ?? DEFAULT_TZ;
   const targetAccount = (args.account as string)?.toLowerCase() ?? null;
+  const accountErrors: EmailSearchAccountError[] = [];
 
   let googleAccounts: TokenResult[] = [];
   let msAccounts: TokenResult[] = [];
@@ -724,23 +800,31 @@ export async function gmailSearchTool(
       try {
         msAccounts = [await getMicrosoftAccessToken(userId, { email: targetAccount })];
       } catch (e) {
-        console.error(`[gmail-helpers] Microsoft token failed for ${targetAccount}: ${(e as Error).message}`);
+        const errorMessage = (e as Error).message;
+        console.error(`[gmail-helpers] Microsoft token failed for ${targetAccount}: ${errorMessage}`);
+        accountErrors.push({ account: targetAccount, provider: 'microsoft', error: errorMessage });
       }
     } else {
       try {
         googleAccounts = [await getGoogleAccessToken(userId, { email: targetAccount })];
       } catch (e) {
-        console.error(`[gmail-helpers] Google token failed for ${targetAccount}: ${(e as Error).message}`);
+        const errorMessage = (e as Error).message;
+        console.error(`[gmail-helpers] Google token failed for ${targetAccount}: ${errorMessage}`);
+        accountErrors.push({ account: targetAccount, provider: 'google', error: errorMessage });
       }
     }
   } else {
     [googleAccounts, msAccounts] = await Promise.all([
       getAllGoogleTokens(userId).catch((e) => {
-        console.error(`[gmail-helpers] getAllGoogleTokens failed: ${(e as Error).message}`);
+        const errorMessage = (e as Error).message;
+        console.error(`[gmail-helpers] getAllGoogleTokens failed: ${errorMessage}`);
+        accountErrors.push({ account: 'google_accounts', provider: 'google', error: errorMessage });
         return [] as TokenResult[];
       }),
       getAllMicrosoftTokens(userId).catch((e) => {
-        console.error(`[gmail-helpers] getAllMicrosoftTokens failed: ${(e as Error).message}`);
+        const errorMessage = (e as Error).message;
+        console.error(`[gmail-helpers] getAllMicrosoftTokens failed: ${errorMessage}`);
+        accountErrors.push({ account: 'microsoft_accounts', provider: 'microsoft', error: errorMessage });
         return [] as TokenResult[];
       }),
     ]);
@@ -759,9 +843,11 @@ export async function gmailSearchTool(
         );
         return details.map((d) => {
           let dateLocal = d.date;
+          let receivedAtMs: number | undefined;
           try {
             const parsed = d.internalDate ? new Date(d.internalDate) : new Date(d.date);
             if (!isNaN(parsed.getTime())) {
+              receivedAtMs = parsed.getTime();
               dateLocal = parsed.toLocaleString('en-AU', {
                 weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
                 hour: 'numeric', minute: '2-digit', hour12: true,
@@ -776,11 +862,16 @@ export async function gmailSearchTool(
             body_preview: d.bodyPreview,
             has_attachments: (d.attachmentCount ?? 0) > 0,
             account: acct.email,
-            provider: 'google',
+            provider: 'google' as const,
+            received_at: receivedAtMs ? new Date(receivedAtMs).toISOString() : undefined,
+            received_at_ms: receivedAtMs,
+            is_important: d.isImportant,
           };
         });
       } catch (e) {
-        console.warn(`[gmail-helpers] gmail_search error for ${acct.email}: ${(e as Error).message}`);
+        const errorMessage = (e as Error).message;
+        console.warn(`[gmail-helpers] gmail_search error for ${acct.email}: ${errorMessage}`);
+        accountErrors.push({ account: acct.email, provider: 'google', error: errorMessage });
         return [];
       }
     }),
@@ -791,7 +882,9 @@ export async function gmailSearchTool(
       try {
         return await searchOutlookMessages(acct.accessToken, acct.email, args.query as string, perAccountMax, searchTz);
       } catch (e) {
-        console.warn(`[gmail-helpers] outlook search error for ${acct.email}: ${(e as Error).message}`);
+        const errorMessage = (e as Error).message;
+        console.warn(`[gmail-helpers] outlook search error for ${acct.email}: ${errorMessage}`);
+        accountErrors.push({ account: acct.email, provider: 'microsoft', error: errorMessage });
         return [];
       }
     }),
@@ -800,21 +893,47 @@ export async function gmailSearchTool(
   const [gResults, mResults] = await Promise.all([googleResults, msResults]);
 
   const allResults = [...gResults.flat(), ...mResults.flat()]
-    .sort((a: any, b: any) => {
-      const da = new Date(a.date || 0).getTime();
-      const db = new Date(b.date || 0).getTime();
+    .sort((a, b) => {
+      const da = a.received_at_ms ?? 0;
+      const db = b.received_at_ms ?? 0;
       return db - da;
     })
     .slice(0, maxResults);
 
   if (!allResults.length) {
     if (allAccounts === 0) {
-      return { results: [], count: 0, message: 'No email accounts connected. The user may need to reconnect their email via the onboarding link.' };
+      const status: EmailSearchStatus = accountErrors.length > 0 ? 'provider_error' : 'no_accounts';
+      return {
+        results: [],
+        count: 0,
+        status,
+        message: status === 'no_accounts'
+          ? 'No email accounts connected. The user may need to reconnect their email via the onboarding link.'
+          : 'Could not access the connected email accounts just now.',
+        account_errors: accountErrors.length ? accountErrors : undefined,
+        accounts_checked: allAccounts,
+      };
     }
-    return { results: [], count: 0, message: 'No emails found matching that query.' };
+    const status: EmailSearchStatus = accountErrors.length > 0 ? 'provider_error' : 'empty';
+    return {
+      results: [],
+      count: 0,
+      status,
+      message: status === 'empty'
+        ? 'No emails found matching that query.'
+        : 'Could not get a complete email result set for that query.',
+      account_errors: accountErrors.length ? accountErrors : undefined,
+      accounts_checked: allAccounts,
+    };
   }
 
-  return { results: allResults, count: allResults.length };
+  return {
+    results: allResults,
+    count: allResults.length,
+    status: 'ok',
+    account_errors: accountErrors.length ? accountErrors : undefined,
+    accounts_checked: allAccounts,
+  };
 }
 
 export async function getEmailTool(

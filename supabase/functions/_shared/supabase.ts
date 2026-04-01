@@ -7,7 +7,10 @@ export function getAdminClient(): SupabaseClient {
   if (!adminClient) {
     adminClient = createClient(
       requireEnv('SUPABASE_URL'),
-      requireAnyEnv('SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY'),
+      requireAnyEnv(
+        'SUPABASE_SECRET_KEY',
+        'NEW_SUPABASE_SECRET_KEY',
+      ),
       {
         auth: {
           persistSession: false,

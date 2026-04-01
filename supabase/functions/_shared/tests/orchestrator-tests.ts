@@ -810,6 +810,7 @@ const mockTrace = {
   agentLoopRounds: 1,
   contextBuildLatencyMs: 50,
   contextSubTimings: null,
+  resolvedUserContext: null,
   agentLoopLatencyMs: 200,
   inputTokens: 0,
   outputTokens: 0,

@@ -16,6 +16,7 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { getAdminClient } from '../_shared/supabase.ts';
+import { authorizeInternalRequest, internalJsonHeaders } from '../_shared/internal-auth.ts';
 import { getGoogleAccessToken, getAllGoogleTokens, getMicrosoftAccessToken } from '../_shared/token-broker.ts';
 import { listGmailThreadIds, fetchGmailThreadsByIds } from '../_shared/gmail-fetcher.ts';
 import { fetchOutlookMessages } from '../_shared/gmail-fetcher.ts';
@@ -35,7 +36,6 @@ import { embedChunks, type ChunkToEmbed, truncateForEmbedding } from '../_shared
 import { softDeleteSource, bulkDeleteSources, bulkCheckNeedsUpdate, insertEmbeddedChunks, sourceNeedsUpdate } from '../_shared/ingestion-helpers.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
 const EMAIL_PAGE_SIZE = 30;
 const CALENDAR_PAGE_SIZE = 80;
@@ -74,9 +74,7 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ error: 'method_not_allowed' }, 405);
   }
 
-  const authHeader = req.headers.get('Authorization') ?? '';
-  const token = authHeader.replace('Bearer ', '').trim();
-  if (!token || !isServiceRoleToken(token)) {
+  if (!authorizeInternalRequest(req)) {
     return jsonResp({ error: 'unauthorized' }, 401);
   }
 
@@ -112,7 +110,7 @@ Deno.serve(async (req: Request) => {
 
     if (isNewJob) {
       for (let i = 0; i < PARALLEL_WORKERS - 1; i++) {
-        chainNext(jobId, authHeader);
+        chainNext(jobId);
       }
     }
 
@@ -162,7 +160,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    chainNext(jobId, authHeader);
+    chainNext(jobId);
 
     return jsonResp({ job_id: jobId, task_id: task.id, status: 'processing' }, 200);
   } catch (e) {
@@ -968,10 +966,7 @@ async function triggerProfileBuild(handle: string): Promise<void> {
 
     const resp = await fetch(`${supabaseUrl}/functions/v1/build-profile`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: internalJsonHeaders(),
       body: JSON.stringify({ handle }),
       signal: controller.signal,
     });
@@ -991,11 +986,11 @@ async function triggerProfileBuild(handle: string): Promise<void> {
 
 // ── Chaining ──────────────────────────────────────────────────
 
-function chainNext(jobId: string, authHeader: string): void {
+function chainNext(jobId: string): void {
   const doChain = () =>
     fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
       method: 'POST',
-      headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+      headers: internalJsonHeaders(),
       body: JSON.stringify({ job_id: jobId }),
     });
 
@@ -1007,17 +1002,6 @@ function chainNext(jobId: string, authHeader: string): void {
 }
 
 // ── Utilities ─────────────────────────────────────────────────
-
-function isServiceRoleToken(token: string): boolean {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return false;
-    const payload = JSON.parse(atob(parts[1]));
-    return payload.role === 'service_role';
-  } catch {
-    return false;
-  }
-}
 
 function jsonResp(body: Record<string, unknown>, status: number): Response {
   return new Response(JSON.stringify(body), {

@@ -3,6 +3,7 @@ import { sendReactionTool } from './send-reaction.ts';
 import { sendEffectTool } from './send-effect.ts';
 import { rememberUserTool } from './remember-user.ts';
 import { generateImageTool } from './generate-image.ts';
+import { editImageTool } from './edit-image.ts';
 import { webSearchTool } from './web-search.ts';
 import { semanticSearchTool } from './semantic-search.ts';
 import { emailReadTool } from './email-read.ts';
@@ -14,7 +15,10 @@ import { contactsReadTool } from './contacts-read.ts';
 import { granolaReadTool } from './granola-read.ts';
 import { travelTimeTool } from './travel-time.ts';
 import { placesSearchTool } from './places-search.ts';
+import { weatherTool } from './weather.ts';
 import { manageReminderTool } from './manage-reminder.ts';
+import { manageNotificationWatchTool } from './notification-watch.ts';
+import { newsSearchTool } from './news-search.ts';
 
 const REGISTRY = new Map<string, ToolContract>();
 
@@ -29,6 +33,7 @@ register(sendReactionTool);
 register(sendEffectTool);
 register(rememberUserTool);
 register(generateImageTool);
+register(editImageTool);
 register(webSearchTool);
 register(semanticSearchTool);
 register(emailReadTool);
@@ -43,7 +48,10 @@ register(contactsReadTool);
 register(granolaReadTool);
 register(travelTimeTool);
 register(placesSearchTool);
+register(weatherTool);
 register(manageReminderTool);
+register(manageNotificationWatchTool);
+register(newsSearchTool);
 
 export function getTool(name: string): ToolContract | undefined {
   return REGISTRY.get(name);

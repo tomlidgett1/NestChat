@@ -17,12 +17,14 @@ const client = getOpenAIClient();
 
 // ============================================================================
 // Proactive action types
+//
+// NOTE: Recovery nudge has been removed. Re-engagement is now handled by
+// the automation-engine (graduated Day 3/5/7 inactivity_reengagement).
 // ============================================================================
 
 export type ProactiveAction =
   | { type: 'hold'; reason: string }
   | { type: 'wait' }
-  | { type: 'recovery_nudge'; message: string }
   | { type: 'memory_moment'; message: string }
   | { type: 'mark_at_risk' }
   | { type: 'mark_activated' };
@@ -54,18 +56,6 @@ export async function evaluateProactiveAction(user: ProactiveEligibleUser): Prom
     return { type: 'mark_at_risk' };
   }
 
-  // Recovery nudge: user opened but never got value, 6-18 hours since last seen
-  if (
-    !user.firstValueDeliveredAt &&
-    hoursSinceLastSeen >= 6 &&
-    hoursSinceLastSeen <= 18 &&
-    !user.recoveryNudgeSentAt &&
-    user.onboardCount >= 1
-  ) {
-    const message = await generateRecoveryNudge(user);
-    return { type: 'recovery_nudge', message };
-  }
-
   // Memory moment: if value delivered + second engagement + high-confidence memories exist
   if (
     user.firstValueDeliveredAt &&
@@ -80,43 +70,6 @@ export async function evaluateProactiveAction(user: ProactiveEligibleUser): Prom
   }
 
   return { type: 'wait' };
-}
-
-// ============================================================================
-// Message generators
-// ============================================================================
-
-async function generateRecoveryNudge(user: ProactiveEligibleUser): Promise<string> {
-  const name = user.name ? ` ${user.name}` : '';
-
-  try {
-    const response = await client.responses.create({
-      model: MODEL_MAP.agent,
-      instructions: `You are Nest, a personal assistant people text. Never mention AI, bots, or technology. Generate a brief, warm recovery nudge for a user who opened a conversation but never got to value. Keep it to 1-2 short sentences. Be casual and low-pressure. Australian spelling.
-
-The user's name is${name || ' unknown'}.
-
-Frame it around easy first uses. Do NOT be generic. Do NOT sound like a notification. Sound like a helpful friend checking in.
-
-Good examples:
-- "Hey${name}, quick one. Text me something you need to remember, a message you want help writing, or a messy list and I'll sort it"
-- "Quick thought for your week: if there's one thing you don't want to forget, send it my way"
-
-Bad examples:
-- "Hey! Just checking in!" (generic)
-- "Don't forget about Nest!" (desperate)
-- "I'm here to help!" (spammy)`,
-      input: 'Generate the recovery nudge.',
-      max_output_tokens: 2048,
-      store: false,
-      reasoning: { effort: REASONING_EFFORT.agent },
-    } as Parameters<typeof client.responses.create>[0]);
-
-    const text = response.output_text;
-    return text ? text.trim() : `Hey${name}, you can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it`;
-  } catch {
-    return `Hey${name}, you can text me something you need to remember, a message you want help writing, or a messy list and I'll sort it`;
-  }
 }
 
 // ============================================================================
@@ -242,7 +195,7 @@ async function evaluateMemoryMoment(user: ProactiveEligibleUser): Promise<string
   try {
     const response = await client.responses.create({
       model: MODEL_MAP.agent,
-      instructions: `You are an intelligence layer for Nest, a personal assistant that people text. Your job is to analyse everything known about a user and produce ONE proactive message that is genuinely, specifically useful to them right now.
+      instructions: `You are an intelligence layer for Nest, a personal assistant that people text. Your job is to analyse everything known about a user and produce ONE proactive message that is genuinely, specifically useful to them right now. Write with warmth, proper capitalisation, and like a thoughtful friend — not a notification system.
 
 Current time: ${now}
 
@@ -263,13 +216,14 @@ ${ctx.hasConnectedAccounts ? 'You have access to their calendar and emails. Cros
 
 - Output ONLY the message text. Nothing else.
 - Keep it to 1-2 short sentences. This is a text message, not an email.
+- Use proper capitalisation and punctuation. Be warm and kind.
 - Be specific. Reference actual things — names, dates, tasks, events. Never be vague.
-- The tone is a sharp, thoughtful friend who noticed something useful — not a notification system.
+- The tone is a thoughtful, caring friend who noticed something useful — not a notification system.
 - Australian spelling.
 - Never mention AI, bots, technology, or that you "analysed" anything. You just remembered / noticed.
 - Never show off memory for its own sake. Every reference must serve the user.
 - If you genuinely cannot find anything useful and specific to say, respond with exactly: SKIP
-- Do NOT be generic. "Hope your week's going well" = instant fail. "Hey, you mentioned wanting to call the dentist before Thursday — still want me to remind you?" = good.
+- Do NOT be generic. "Hope your week's going well" = instant fail. "Hey Tom, I was thinking about that dentist appointment — would you like me to set a reminder before Thursday?" = good.
 
 ## Anti-patterns (never do these)
 - "I remember you mentioned..." (showing off)
@@ -340,15 +294,6 @@ export async function executeProactiveAction(
         payload: { activationScore: user.activationScore },
       });
       return { sent: false };
-
-    case 'recovery_nudge':
-      await recordProactiveMessage(user.handle, `DM#${user.botNumber}#${user.handle}`, 'recovery_nudge', action.message);
-      await emitOnboardingEvent({
-        handle: user.handle,
-        eventType: 'recovery_nudge_sent',
-        currentState: user.onboardState,
-      });
-      return { sent: true, message: action.message };
 
     case 'memory_moment':
       await recordProactiveMessage(user.handle, `DM#${user.botNumber}#${user.handle}`, 'memory_moment', action.message);

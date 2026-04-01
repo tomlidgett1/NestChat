@@ -182,12 +182,16 @@ function safeParseJsonObj(s: string): Record<string, unknown> {
 
 let _callIdCounter = 0;
 
+export type GeminiToolChoice =
+  | string
+  | { type: 'function'; name: string };
+
 export async function geminiGenerateContent(opts: {
   model: string;
   systemPrompt: string;
   contents: GeminiContent[];
   tools?: GeminiTool[];
-  toolChoice?: string;
+  toolChoice?: GeminiToolChoice;
   maxOutputTokens: number;
 }): Promise<GeminiUnifiedResponse> {
   const apiKey = getGeminiApiKey();
@@ -212,7 +216,18 @@ export async function geminiGenerateContent(opts: {
     body.tools = opts.tools;
   }
 
-  if (opts.toolChoice === 'required') {
+  if (
+    typeof opts.toolChoice === 'object' &&
+    opts.toolChoice?.type === 'function' &&
+    opts.toolChoice.name
+  ) {
+    body.toolConfig = {
+      functionCallingConfig: {
+        mode: 'ANY',
+        allowedFunctionNames: [opts.toolChoice.name],
+      },
+    };
+  } else if (opts.toolChoice === 'required') {
     body.toolConfig = {
       functionCallingConfig: { mode: 'ANY' },
     };

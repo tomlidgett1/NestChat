@@ -1,4 +1,5 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
+// v2: weather tool integration
 import { getOptionalEnv, QUEUE_NAME } from '../_shared/env.ts';
 import { processWebhookEvent } from '../_shared/pipeline.ts';
 import { getWebhookEvent, markWebhookEventStatus, recordJobFailure } from '../_shared/state.ts';

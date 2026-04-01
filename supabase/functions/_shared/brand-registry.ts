@@ -1,7 +1,14 @@
 // ═══════════════════════════════════════════════════════════════
 // Brand registry — maps activation keywords to brand configs.
 // Add new brands here; the pipeline picks them up automatically.
+//
+// Canonical copy of these systemPrompt strings for the business portal /
+// database seed lives at: website/api/_data/brand-default-prompts.json
+// Regenerate after edits: `npm run extract-brand-prompts` (from website/).
+// Runtime prefers nest_brand_chat_config.core_system_prompt when set.
 // ═══════════════════════════════════════════════════════════════
+
+import { getAdminClient } from './supabase.ts';
 
 export interface BrandConfig {
   name: string;
@@ -2809,17 +2816,126 @@ END SYSTEM`,
   },
 };
 
+// ═══════════════════════════════════════════════════════════════
+// Dynamic brand lookup — checks hardcoded registry first, then
+// falls back to DB (nest_brand_chat_config) for self-service brands.
+// ═══════════════════════════════════════════════════════════════
+
+const DB_BRAND_CACHE = new Map<string, { at: number; config: BrandConfig | null }>();
+const DB_CACHE_TTL_MS = 30_000;
+
+const ACTIVATION_RESOLVE_CACHE = new Map<string, { at: number; canonical: string | null }>();
+const ACTIVATION_RESOLVE_TTL_MS = 30_000;
+
+/**
+ * Map a "Hey <word>" token to canonical brand_key (DB or hardcoded registry).
+ * Aliases in nest_brand_chat_config.activation_aliases also work when core_system_prompt is set.
+ */
+export async function resolveCanonicalBrandKey(activationWord: string): Promise<string | null> {
+  const kw = activationWord.toLowerCase();
+
+  // "ash-internal" → derive from base key "ash"
+  if (kw.endsWith('-internal')) {
+    const base = kw.replace(/-internal$/, '');
+    const baseResolved = await resolveCanonicalBrandKey(base);
+    return baseResolved ? `${baseResolved}-internal` : null;
+  }
+
+  if (kw in BRAND_REGISTRY) return kw;
+
+  const now = Date.now();
+  const cached = ACTIVATION_RESOLVE_CACHE.get(kw);
+  if (cached && now - cached.at < ACTIVATION_RESOLVE_TTL_MS) return cached.canonical;
+
+  let canonical: string | null = null;
+  try {
+    const byKey = await getBrandFromDB(kw);
+    if (byKey) canonical = kw;
+    else {
+      const supabase = getAdminClient();
+      const { data, error } = await supabase
+        .from('nest_brand_chat_config')
+        .select('brand_key, core_system_prompt')
+        .contains('activation_aliases', [kw])
+        .limit(1);
+
+      if (!error) {
+        const row = data?.[0];
+        if (row?.brand_key && String(row.core_system_prompt ?? '').trim()) {
+          canonical = row.brand_key;
+        }
+      }
+    }
+  } catch {
+    canonical = null;
+  }
+
+  ACTIVATION_RESOLVE_CACHE.set(kw, { at: now, canonical });
+  return canonical;
+}
+
+async function getBrandFromDB(keyword: string): Promise<BrandConfig | null> {
+  const key = keyword.toLowerCase();
+  const now = Date.now();
+  const hit = DB_BRAND_CACHE.get(key);
+  if (hit && now - hit.at < DB_CACHE_TTL_MS) return hit.config;
+
+  try {
+    const supabase = getAdminClient();
+    const { data, error } = await supabase
+      .from('nest_brand_chat_config')
+      .select('brand_key, business_display_name, core_system_prompt')
+      .eq('brand_key', key)
+      .maybeSingle();
+
+    if (error || !data || !data.core_system_prompt?.trim()) {
+      DB_BRAND_CACHE.set(key, { at: now, config: null });
+      return null;
+    }
+
+    const config: BrandConfig = {
+      name: data.business_display_name || key,
+      systemPrompt: data.core_system_prompt,
+    };
+    DB_BRAND_CACHE.set(key, { at: now, config });
+    return config;
+  } catch {
+    DB_BRAND_CACHE.set(key, { at: now, config: null });
+    return null;
+  }
+}
+
 /**
  * Look up a brand by its activation keyword (case-insensitive).
- * Returns null if the keyword isn't registered.
+ * Checks the hardcoded registry first (sync), returns immediately if found.
  */
 export function getBrand(keyword: string): BrandConfig | null {
   return BRAND_REGISTRY[keyword.toLowerCase()] ?? null;
 }
 
 /**
+ * Look up a brand by keyword — checks hardcoded registry, then DB.
+ * "-internal" suffix is stripped so "ash-internal" resolves to the "ash" config.
+ */
+export async function getBrandAsync(keyword: string): Promise<BrandConfig | null> {
+  const key = keyword.toLowerCase();
+  const base = key.endsWith('-internal') ? key.replace(/-internal$/, '') : key;
+  const registryHit = BRAND_REGISTRY[base];
+  if (registryHit) return registryHit;
+  return getBrandFromDB(base);
+}
+
+/**
  * Check whether a keyword is a registered brand (case-insensitive).
+ * Sync version — only checks hardcoded registry.
  */
 export function isBrandKeyword(keyword: string): boolean {
   return keyword.toLowerCase() in BRAND_REGISTRY;
+}
+
+/**
+ * Check whether a keyword is a registered brand — checks registry then DB.
+ */
+export async function isBrandKeywordAsync(keyword: string): Promise<boolean> {
+  return (await resolveCanonicalBrandKey(keyword)) !== null;
 }

@@ -6,9 +6,9 @@
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
+import { authorizeInternalRequest, internalJsonHeaders } from '../_shared/internal-auth.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const STALE_JOB_THRESHOLD_MS = 5 * 60 * 1000;
 
 Deno.serve(async (req: Request) => {
@@ -18,9 +18,7 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const authHeader = req.headers.get('Authorization') ?? '';
-  const token = authHeader.replace('Bearer ', '').trim();
-  if (!token || !isServiceRoleToken(token)) {
+  if (!authorizeInternalRequest(req)) {
     return jsonResp({ error: 'unauthorized' }, 401);
   }
 
@@ -41,10 +39,7 @@ Deno.serve(async (req: Request) => {
       try {
         const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${serviceRoleKey}`,
-            'Content-Type': 'application/json',
-          },
+          headers: internalJsonHeaders(),
           body: JSON.stringify({ job_id: job.id }),
         });
         if (resp.ok) resumed++;
@@ -100,10 +95,7 @@ Deno.serve(async (req: Request) => {
           try {
             const resp = await fetch(`${supabaseUrl}/functions/v1/ingest-pipeline`, {
               method: 'POST',
-              headers: {
-                Authorization: `Bearer ${serviceRoleKey}`,
-                'Content-Type': 'application/json',
-              },
+              headers: internalJsonHeaders(),
               body: JSON.stringify({
                 handle,
                 mode: 'incremental',
@@ -148,17 +140,6 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ error: (e as Error).message }, 500);
   }
 });
-
-function isServiceRoleToken(token: string): boolean {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return false;
-    const payload = JSON.parse(atob(parts[1]));
-    return payload.role === 'service_role';
-  } catch {
-    return false;
-  }
-}
 
 function jsonResp(body: Record<string, unknown>, status: number): Response {
   return new Response(JSON.stringify(body), {

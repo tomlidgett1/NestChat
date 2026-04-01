@@ -25,7 +25,10 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "tsc --noEmit",
+    "test:compare": "tsx src/compare/tests/run-tests.ts",
+    "test:hey-ash": "bash scripts/test-hey-ash-brand-chat.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

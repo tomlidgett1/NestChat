@@ -2,6 +2,7 @@ import { chatAgent } from "../agents/chat.ts";
 import {
   composeCompactPrompt,
   composePrompt,
+  composeResearchLitePrompt,
 } from "../agents/prompt-layers.ts";
 import { smartAgent } from "../agents/smart.ts";
 import { emptyWorkingMemory } from "../orchestrator/types.ts";
@@ -101,6 +102,8 @@ function makeContext(overrides: Partial<TurnContext> = {}): TurnContext {
       useLinq: false,
       firstSeen: 1740960000,
       lastSeen: Math.floor(Date.now() / 1000) - 60 * 60 * 14,
+      deepProfileSnapshot: null,
+      deepProfileBuiltAt: null,
     },
     connectedAccounts: [],
     transcriptions: [],
@@ -108,6 +111,33 @@ function makeContext(overrides: Partial<TurnContext> = {}): TurnContext {
     workingMemory: emptyWorkingMemory(),
     pendingEmailSend: null,
     pendingEmailSends: [],
+    resolvedUserContext: {
+      homeLocation: {
+        label: "Melbourne",
+        role: "home",
+        precision: "city",
+        confidence: "high",
+        source: "memory",
+        explicitness: "explicit",
+        memoryId: 2,
+        lastUpdatedAt: "2026-03-10T00:00:00.000Z",
+      },
+      currentLocation: null,
+      workLocation: null,
+      assumedLocation: {
+        label: "Melbourne",
+        role: "home",
+        precision: "city",
+        confidence: "high",
+        source: "memory",
+        explicitness: "explicit",
+        memoryId: 2,
+        lastUpdatedAt: "2026-03-10T00:00:00.000Z",
+      },
+      assumptionPolicy: "direct",
+      dietaryPreferences: [],
+      reasons: ["Home location candidate: Melbourne (high, city)."],
+    },
     ...overrides,
   };
 }
@@ -170,6 +200,10 @@ assert(
   chatPrompt.includes("The user is writing in lowercase."),
   "lowercase style cue is included",
 );
+assert(
+  chatPrompt.includes("capitalise the first letter of every sentence"),
+  "lowercase style cue requires sentence case",
+);
 assert(chatPrompt.includes("Thread state:"), "re-entry thread cue is included");
 assert(
   chatPrompt.includes("Location anchors:"),
@@ -181,6 +215,14 @@ assert(
   chatPrompt.includes('Never start a follow-up question with "Want...?"'),
   "want-style follow-up ban is present",
 );
+assert(
+  chatPrompt.includes("Have a point of view."),
+  "shared behaviour layer includes honest point-of-view guidance",
+);
+assert(
+  chatPrompt.includes("Do not over-function."),
+  "shared behaviour layer includes anti-overfunction guidance",
+);
 
 const smartPrompt = composePrompt(
   smartAgent,
@@ -191,6 +233,10 @@ const smartPrompt = composePrompt(
 assert(
   smartPrompt.includes("Mode: Task and agentic work"),
   "smart mode layer is included",
+);
+assert(
+  smartPrompt.includes("Resolved local context"),
+  "full prompt carries resolved local context",
 );
 
 const compactUnknownTimezone = composeCompactPrompt(
@@ -204,7 +250,10 @@ const compactUnknownTimezone = composeCompactPrompt(
       useLinq: false,
       firstSeen: 1740960000,
       lastSeen: Math.floor(Date.now() / 1000) - 60 * 60 * 20,
+      deepProfileSnapshot: null,
+      deepProfileBuiltAt: null,
     },
+    resolvedUserContext: null,
   }),
   makeInput({ timezone: null, userMessage: "hey" }),
 );
@@ -234,6 +283,20 @@ assert(
 assert(
   compactRich.includes("Local daypart:"),
   "compact prompt carries a daypart cue",
+);
+
+const researchLitePrompt = composeResearchLitePrompt(
+  richContext,
+  makeInput({ userMessage: "weather today" }),
+);
+
+assert(
+  researchLitePrompt.includes("Resolved local context"),
+  "research-lite prompt carries resolved local context",
+);
+assert(
+  researchLitePrompt.includes("Assumed location for low-risk local questions: Melbourne."),
+  "research-lite prompt carries the assumed local location",
 );
 
 console.log("All prompt layer tests passed.");

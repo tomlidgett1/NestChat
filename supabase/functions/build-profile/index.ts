@@ -2,10 +2,13 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
 import { geminiSimpleText, isGeminiModel } from '../_shared/ai/gemini.ts';
 import { MODEL_MAP, getOpenAIClient } from '../_shared/ai/models.ts';
+import { authorizeInternalRequest } from '../_shared/internal-auth.ts';
 
 const PROFILE_SYNTHESIS_PROMPT = `You are building a private profile snapshot of a person based on their emails, calendar events, contacts, and meeting notes. This will be used by a personal assistant to answer "what do you know about me?" instantly.
 
 Your job: synthesise ALL the raw data into a structured, richly detailed profile. Be specific. Names, dates, patterns, habits, relationships, quirks — the more specific, the better.
+
+This is a FIRST BUILD — there is no prior snapshot. Build from scratch using all the data provided.
 
 Output a JSON object with these sections:
 
@@ -58,6 +61,67 @@ Rules:
 - If you see something surprising or contradictory, note it.
 - The "conversation_hooks" section is critical — these are pre-written implications/observations the assistant can drop.
 - If data is thin for a section, include what you have. Don't pad with generics.
+- Output ONLY valid JSON. No markdown, no explanation.`;
+
+const PROFILE_UPDATE_PROMPT = `You are updating a private profile snapshot of a person. A new email account has been connected, bringing additional data. Your job is to IMPROVE the existing profile — filling gaps, correcting anything that was uncertain, and adding new detail from the new data.
+
+You will receive:
+1. The EXISTING profile snapshot (already built from prior data)
+2. NEW raw data from the additional connected account
+
+Rules for updating:
+- PRESERVE everything from the existing profile that the new data doesn't contradict.
+- IMPROVE any field where the new data gives you more specificity or confidence.
+- ADD new entries (colleagues, meetings, interests, patterns) discovered in the new data.
+- RESOLVE contradictions by favouring the most specific or most recent evidence — note the conflict in "notable_patterns" if significant.
+- The "conversation_hooks" and "notable_patterns" sections should ACCUMULATE — add new ones, keep the best existing ones. Do not wipe them.
+- If new data is thin for a section, leave the existing content intact.
+
+Output the same JSON structure as the existing snapshot:
+
+{
+  "identity": {
+    "name": "...",
+    "email": "...",
+    "company": "...",
+    "role": "...",
+    "location_signals": ["city/timezone clues from calendar or emails"],
+    "phone": "..."
+  },
+  "work_life": {
+    "company_description": "what the company does, one line",
+    "role_description": "what they actually do day-to-day based on emails/calendar",
+    "key_colleagues": ["name - relationship/context"],
+    "recurring_meetings": ["meeting name - frequency - who with"],
+    "active_projects": ["project/topic - brief context"],
+    "work_patterns": ["e.g. sends emails late at night", "calendar blocks every Friday afternoon"]
+  },
+  "personal_life": {
+    "interests": ["specific interests with evidence"],
+    "habits": ["specific habits with evidence"],
+    "relationships": ["name - context (family/friend/partner)"],
+    "subscriptions_services": ["services they use based on receipts/emails"],
+    "travel": ["recent or upcoming trips with details"],
+    "food_dining": ["restaurants, food preferences, delivery services"]
+  },
+  "personality_signals": {
+    "communication_style": "how they write emails - formal/casual, long/short, etc",
+    "patience_threshold": "how they handle frustration based on email tone",
+    "organisational_style": "how they manage their time/tasks",
+    "quirks": ["specific behavioural quirks you noticed"]
+  },
+  "side_projects": [
+    {"name": "...", "description": "...", "evidence": "..."}
+  ],
+  "notable_patterns": [
+    "Specific, surprising patterns - the kind of thing that would make someone go 'how do you know that?'"
+  ],
+  "conversation_hooks": [
+    "Things you could drop in conversation that would impress them - oblique references, loaded questions, knowing comments"
+  ]
+}
+
+- Be SPECIFIC. "Likes food" is useless. "Orders from Uber Eats 3x a week, mostly Thai" is gold.
 - Output ONLY valid JSON. No markdown, no explanation.`;
 
 async function fastLlmText(systemPrompt: string, userMessage: string, maxTokens = 4096): Promise<string> {
@@ -171,6 +235,18 @@ async function gatherRawData(
   return sections.join('\n');
 }
 
+async function getExistingSnapshot(
+  supabase: ReturnType<typeof getAdminClient>,
+  handle: string,
+): Promise<Record<string, unknown> | null> {
+  const { data } = await supabase
+    .from('user_profiles')
+    .select('deep_profile_snapshot')
+    .eq('handle', handle)
+    .maybeSingle();
+  return (data?.deep_profile_snapshot as Record<string, unknown>) ?? null;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, {
@@ -182,9 +258,7 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ error: 'method_not_allowed' }, 405);
   }
 
-  const authHeader = req.headers.get('Authorization') ?? '';
-  const token = authHeader.replace('Bearer ', '').trim();
-  if (!token || !isServiceRoleToken(token)) {
+  if (!authorizeInternalRequest(req)) {
     return jsonResp({ error: 'unauthorized' }, 401);
   }
 
@@ -202,7 +276,10 @@ Deno.serve(async (req: Request) => {
 
     console.log(`[build-profile] Starting profile synthesis for ${handle}`);
 
-    const rawData = await gatherRawData(supabase, handle);
+    const [rawData, existingSnapshot] = await Promise.all([
+      gatherRawData(supabase, handle),
+      getExistingSnapshot(supabase, handle),
+    ]);
     const gatherMs = Date.now() - start;
 
     if (rawData.length < 200) {
@@ -210,16 +287,30 @@ Deno.serve(async (req: Request) => {
       return jsonResp({ status: 'skipped', reason: 'insufficient_data', data_length: rawData.length }, 200);
     }
 
-    console.log(`[build-profile] Gathered ${rawData.length} chars of raw data in ${gatherMs}ms — synthesising...`);
+    const isUpdate = existingSnapshot !== null;
+    console.log(
+      `[build-profile] Gathered ${rawData.length} chars in ${gatherMs}ms — mode=${isUpdate ? 'update' : 'build'} — synthesising...`,
+    );
 
     const truncatedData = rawData.slice(0, 60_000);
 
+    let systemPrompt: string;
+    let userMessage: string;
+
+    if (isUpdate) {
+      systemPrompt = PROFILE_UPDATE_PROMPT;
+      const existingJson = JSON.stringify(existingSnapshot, null, 2);
+      // Reserve ~20KB for existing snapshot, rest for new raw data
+      const truncatedExisting = existingJson.slice(0, 20_000);
+      const truncatedNew = truncatedData.slice(0, 40_000);
+      userMessage = `## EXISTING PROFILE SNAPSHOT\n${truncatedExisting}\n\n## NEW RAW DATA FROM ADDITIONAL ACCOUNT\n${truncatedNew}`;
+    } else {
+      systemPrompt = PROFILE_SYNTHESIS_PROMPT;
+      userMessage = `Here is all the data for this person:\n\n${truncatedData}`;
+    }
+
     const synthesisStart = Date.now();
-    const profileText = await fastLlmText(
-      PROFILE_SYNTHESIS_PROMPT,
-      `Here is all the data for this person:\n\n${truncatedData}`,
-      4096,
-    );
+    const profileText = await fastLlmText(systemPrompt, userMessage, 4096);
     const synthesisMs = Date.now() - synthesisStart;
 
     let profileJson: Record<string, unknown>;
@@ -247,13 +338,14 @@ Deno.serve(async (req: Request) => {
 
     const totalMs = Date.now() - start;
     console.log(
-      `[build-profile] Profile built for ${handle} in ${totalMs}ms ` +
+      `[build-profile] Profile ${isUpdate ? 'updated' : 'built'} for ${handle} in ${totalMs}ms ` +
       `(gather: ${gatherMs}ms, synthesis: ${synthesisMs}ms, ` +
       `data: ${rawData.length} chars)`
     );
 
     return jsonResp({
       status: 'completed',
+      mode: isUpdate ? 'update' : 'build',
       handle,
       timing: { total_ms: totalMs, gather_ms: gatherMs, synthesis_ms: synthesisMs },
       data_chars: rawData.length,
@@ -264,17 +356,6 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ error: 'internal', detail: (e as Error).message }, 500);
   }
 });
-
-function isServiceRoleToken(token: string): boolean {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return false;
-    const payload = JSON.parse(atob(parts[1]));
-    return payload.role === 'service_role';
-  } catch {
-    return false;
-  }
-}
 
 function jsonResp(body: Record<string, unknown>, status: number): Response {
   return new Response(JSON.stringify(body), {

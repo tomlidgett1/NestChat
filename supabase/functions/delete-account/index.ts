@@ -5,12 +5,12 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-const serviceRoleKey =
-  Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
+const adminKey =
+  Deno.env.get("SUPABASE_SECRET_KEY") ??
+  Deno.env.get("NEW_SUPABASE_SECRET_KEY") ??
   "";
 
-const admin = createClient(supabaseUrl, serviceRoleKey, {
+const admin = createClient(supabaseUrl, adminKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
@@ -138,65 +138,56 @@ Deno.serve(async (req: Request) => {
 
   // Tables keyed by handle (no FK cascade from auth.users)
   if (handle) {
-    const handleTables = [
-      "search_embeddings",
-      "search_documents",
-      "memory_items",
-      "conversation_summaries",
-      "conversation_messages",
-      "conversations",
-      "outbound_messages",
-      "proactive_messages",
-      "onboarding_events",
-      "experiment_assignments",
-      "tool_traces",
-      "pending_actions",
-      "ingestion_tasks",
-      "ingestion_jobs",
-    ];
+    await deleteNotificationWebhookEventsForHandle(handle, errors, cleaned);
 
-    for (const table of handleTables) {
-      const col =
-        table === "conversations" ||
-        table === "conversation_messages" ||
-        table === "outbound_messages" ||
-        table === "tool_traces" ||
-        table === "pending_actions"
-          ? "chat_id"
-          : "handle";
+    for (const table of HANDLE_COLUMN_TABLES) {
+      const result = await deleteFrom(table, "handle", handle);
+      if (result.error) {
+        console.error(`[delete-account] ${table}: ${result.error}`);
+        errors.push(`${table}: ${result.error}`);
+      } else {
+        cleaned.push(table);
+        console.log(
+          `[delete-account] Deleted ${result.count} rows from ${table}`,
+        );
+      }
+    }
 
-      // For chat_id-based tables, we need to find all chat_ids for this handle
-      if (col === "chat_id") {
-        const chatIds = await getChatIdsForHandle(handle);
-        if (chatIds.length > 0) {
-          const { error } = await admin
-            .from(table)
-            .delete()
-            .in("chat_id", chatIds);
-          if (error) {
-            console.error(
-              `[delete-account] ${table}: ${error.message}`,
-            );
-            errors.push(`${table}: ${error.message}`);
-          } else {
-            cleaned.push(table);
-          }
+    // conversation_summaries uses sender_handle, not handle
+    {
+      const result = await deleteFrom(
+        "conversation_summaries",
+        "sender_handle",
+        handle,
+      );
+      if (result.error) {
+        console.error(
+          `[delete-account] conversation_summaries: ${result.error}`,
+        );
+        errors.push(`conversation_summaries: ${result.error}`);
+      } else {
+        cleaned.push("conversation_summaries");
+        console.log(
+          `[delete-account] Deleted ${result.count} rows from conversation_summaries`,
+        );
+      }
+    }
+
+    const chatIds = await getChatIdsForHandle(handle);
+    for (const table of CHAT_ID_TABLES) {
+      if (chatIds.length > 0) {
+        const { error } = await admin
+          .from(table)
+          .delete()
+          .in("chat_id", chatIds);
+        if (error) {
+          console.error(`[delete-account] ${table}: ${error.message}`);
+          errors.push(`${table}: ${error.message}`);
         } else {
           cleaned.push(table);
         }
       } else {
-        const result = await deleteFrom(table, "handle", handle);
-        if (result.error) {
-          console.error(
-            `[delete-account] ${table}: ${result.error}`,
-          );
-          errors.push(`${table}: ${result.error}`);
-        } else {
-          cleaned.push(table);
-          console.log(
-            `[delete-account] Deleted ${result.count} rows from ${table}`,
-          );
-        }
+        cleaned.push(table);
       }
     }
 
@@ -225,6 +216,20 @@ Deno.serve(async (req: Request) => {
         errors.push(`webhook_events: ${result.error}`);
       } else {
         cleaned.push("webhook_events");
+      }
+    }
+
+    // Bug reports may only have sender_handle set (auth_user_id null)
+    {
+      const result = await deleteFrom(
+        "reported_bugs",
+        "sender_handle",
+        handle,
+      );
+      if (result.error) {
+        errors.push(`reported_bugs(sender_handle): ${result.error}`);
+      } else {
+        cleaned.push("reported_bugs(sender_handle)");
       }
     }
 
@@ -348,17 +353,97 @@ async function resolveHandle(uid: string): Promise<string | null> {
 }
 
 async function getChatIdsForHandle(handle: string): Promise<string[]> {
-  // Chat IDs follow the pattern "DM#<bot_number>#<handle>"
-  // Also check conversation_messages for any chat_id containing the handle
-  const { data } = await admin
-    .from("conversation_messages")
-    .select("chat_id")
+  // Include bare handle as chat_id (legacy / edge cases) and every chat_id seen
+  // for this participant, matching debug admin purge behaviour.
+  const ids = new Set<string>([handle]);
+  const [byParticipant, byChatId] = await Promise.all([
+    admin.from("conversation_messages").select("chat_id").eq("handle", handle),
+    admin.from("conversation_messages").select("chat_id").eq("chat_id", handle),
+  ]);
+  for (const row of byParticipant.data ?? []) {
+    if (row.chat_id) ids.add(row.chat_id as string);
+  }
+  for (const row of byChatId.data ?? []) {
+    if (row.chat_id) ids.add(row.chat_id as string);
+  }
+  return [...ids];
+}
+
+/** Tables keyed by `handle` (not `chat_id` / `sender_handle`). */
+const HANDLE_COLUMN_TABLES = [
+  "search_embeddings",
+  "search_documents",
+  "memory_items",
+  "proactive_messages",
+  "onboarding_events",
+  "experiment_assignments",
+  "ingestion_tasks",
+  "ingestion_jobs",
+  "automation_runs",
+  "automation_preferences",
+  "reminders",
+  "notification_webhook_subscriptions",
+  "notification_watch_triggers",
+  "group_chat_members",
+] as const;
+
+const CHAT_ID_TABLES = [
+  "conversations",
+  "conversation_messages",
+  "outbound_messages",
+  "tool_traces",
+  "pending_actions",
+] as const;
+
+async function deleteNotificationWebhookEventsForHandle(
+  handle: string,
+  errors: string[],
+  cleaned: string[],
+): Promise<void> {
+  const { data: subs, error: subsErr } = await admin
+    .from("notification_webhook_subscriptions")
+    .select("id, account_email")
     .eq("handle", handle);
 
-  if (!data || data.length === 0) return [];
+  if (subsErr) {
+    errors.push(`notification_webhook_subscriptions(select): ${subsErr.message}`);
+    return;
+  }
+  if (!subs?.length) {
+    cleaned.push("notification_webhook_events");
+    return;
+  }
 
-  const uniqueIds = [...new Set(data.map((r: { chat_id: string }) => r.chat_id))];
-  return uniqueIds;
+  const subIds = subs.map((s: { id: string }) => s.id);
+  const emails = [
+    ...new Set(
+      subs
+        .map((s: { account_email: string }) => s.account_email)
+        .filter(Boolean),
+    ),
+  ];
+
+  const { error: evErr } = await admin
+    .from("notification_webhook_events")
+    .delete()
+    .in("subscription_id", subIds);
+  if (evErr) {
+    errors.push(`notification_webhook_events(subscription_id): ${evErr.message}`);
+    return;
+  }
+
+  if (emails.length > 0) {
+    const { error: evEmailErr } = await admin
+      .from("notification_webhook_events")
+      .delete()
+      .in("account_email", emails);
+    if (evEmailErr) {
+      errors.push(`notification_webhook_events(account_email): ${evEmailErr.message}`);
+      return;
+    }
+  }
+
+  cleaned.push("notification_webhook_events");
 }
 
 async function gatherConnectedAccounts(

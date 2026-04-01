@@ -8,7 +8,7 @@ export const operatorAgent: AgentConfig = {
   modelTier: 'agent',
   maxOutputTokens: 16384,
   toolPolicy: {
-    allowedNamespaces: ['memory.read', 'memory.write', 'email.read', 'email.write', 'calendar.read', 'calendar.write', 'contacts.read', 'granola.read', 'web.search', 'knowledge.search', 'messaging.react', 'messaging.effect', 'media.generate', 'travel.search', 'reminders.manage'],
+    allowedNamespaces: ['memory.read', 'memory.write', 'email.read', 'email.write', 'calendar.read', 'calendar.write', 'contacts.read', 'granola.read', 'web.search', 'knowledge.search', 'messaging.react', 'messaging.effect', 'media.generate', 'travel.search', 'weather.search', 'reminders.manage', 'notifications.watch'],
     blockedNamespaces: ['admin.internal'],
     maxToolRounds: 8,
   },

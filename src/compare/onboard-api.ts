@@ -3,6 +3,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { Request, Response } from 'express';
 import { getSupabase } from '../lib/supabase.js';
+import { internalEdgeJsonHeaders } from '../lib/internal-edge-auth.js';
+import { formatMissingEdgeFunctionMessage } from '../lib/supabase-edge-function-errors.js';
 
 const openai = new OpenAI();
 const anthropic = new Anthropic();
@@ -56,7 +58,7 @@ Stop when enough has been said.
 Match the user's emotional temperature.
 Mirror the user's obvious register when it helps.
 If they text casually, be casual.
-If they write in lowercase, you can mirror that.
+Even when they write in all lowercase, use normal sentence case: capitalise the first letter of every sentence and every message bubble.
 
 Use Australian spelling.
 Do not use em dashes.
@@ -266,7 +268,7 @@ function buildOnboardingPrompt(session: OnboardSession): string {
   const userTurnNumber = session.turnCount + 1;
   const isFirstMessage = session.turnCount === 0;
   const isEarlyConversation = userTurnNumber <= 3;
-  const shouldForceVerification = userTurnNumber >= 4 && userTurnNumber <= 5;
+  const shouldForceVerification = userTurnNumber === 5;
 
   sections.push(
     `Onboarding Context\nThis is a NEW user who hasn't verified yet. Your only job: be useful immediately. Earn trust fast.`,
@@ -306,11 +308,7 @@ The goal: keep them wanting to continue the thread while showing fast, specific 
   } else if (isEarlyConversation) {
     verificationBlock = `Only include the verification link if they explicitly ask how to sign up or get started. Otherwise, keep being useful.`;
   } else if (shouldForceVerification && !session.verificationSent) {
-    verificationBlock = `This turn is user message #${userTurnNumber}. You MUST include a verification prompt now.
-
-Mention that you need to verify they're human (can be cheeky).
-
-Then put the verification link in its own separate bubble on its own line:
+    verificationBlock = `This is the 5th message in the conversation. Casually drop in that you just need to quickly verify they're human — keep it light and natural, not a big deal. Then put the verification link on its own line as a separate bubble:
 
 ${session.onboardUrl}
 
@@ -358,7 +356,7 @@ function enforceVerificationBubble(
   alreadySent: boolean,
 ): string | null {
   if (alreadySent) return text;
-  if (userTurnNumber < 4 || userTurnNumber > 5) return text;
+  if (userTurnNumber !== 5) return text;
 
   if (text && text.includes('nest.expert')) return text;
 
@@ -479,7 +477,6 @@ export async function handleOnboardNew(req: Request, res: Response) {
 // ═══════════════════════════════════════════════════════════════
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 async function callSupabaseOnboard(
   message: string,
@@ -504,15 +501,14 @@ async function callSupabaseOnboard(
   }
   const resp = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-    },
+    headers: internalEdgeJsonHeaders(),
     body: JSON.stringify(payload),
   });
   if (!resp.ok) {
     const errBody = await resp.text();
-    throw new Error(`Supabase onboard call failed (${resp.status}): ${errBody}`);
+    throw new Error(
+      formatMissingEdgeFunctionMessage('debug-dashboard', resp.status, errBody, 'Supabase onboard call failed'),
+    );
   }
   return await resp.json() as Record<string, unknown>;
 }

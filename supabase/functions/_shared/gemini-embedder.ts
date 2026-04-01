@@ -147,8 +147,27 @@ export async function batchEmbedTexts(
 
   for (let i = 0; i < texts.length; i += BATCH_MAX_TEXTS) {
     const batch = texts.slice(i, i + BATCH_MAX_TEXTS);
+    const t0 = Date.now();
     const batchResults = await callBatchEmbedContents(batch);
     results.push(...batchResults);
+
+    // Log Gemini embedding cost (fire-and-forget)
+    import("./cost-tracker.ts").then(({ logApiCost }) => {
+      import("./supabase.ts").then(({ getAdminClient }) => {
+        logApiCost(getAdminClient(), {
+          userId: null,
+          model: "gemini-embedding-2-preview",
+          provider: "gemini",
+          endpoint: "embeddings",
+          description: `Gemini embedding batch (${batch.length} texts)`,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsdOverride: 0, // Gemini embedding preview is free
+          latencyMs: Date.now() - t0,
+          metadata: { batch_size: batch.length, batch_offset: i },
+        });
+      });
+    }).catch(() => {});
 
     // Delay between sub-batches to respect rate limits
     if (i + BATCH_MAX_TEXTS < texts.length) {

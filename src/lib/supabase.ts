@@ -14,12 +14,13 @@ function getSupabaseUrl(): string {
 
 function getSupabaseKey(): string {
   const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_ANON_KEY ||
-    process.env.SUPABASE_PUBLISHABLE_KEY;
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.NEW_SUPABASE_SECRET_KEY;
 
   if (!key) {
-    throw new Error('Set SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, or SUPABASE_PUBLISHABLE_KEY');
+    throw new Error(
+      'Set SUPABASE_SECRET_KEY or NEW_SUPABASE_SECRET_KEY',
+    );
   }
 
   return key;
@@ -50,7 +51,7 @@ export async function verifySupabaseSetup(): Promise<void> {
 
     if (error) {
       console.warn(`[supabase] Table "${table}" is not ready: ${error.message}`);
-      console.warn('[supabase] Apply supabase/schema.sql in the Supabase SQL editor, or provide a service role key for automated admin access.');
+      console.warn('[supabase] Apply supabase/schema.sql in the Supabase SQL editor, or provide a server secret key for automated admin access.');
     } else {
       console.log(`[supabase] Table "${table}" is reachable`);
     }

@@ -3,7 +3,7 @@ import type { ToolContract } from './types.ts';
 export const sendReactionTool: ToolContract = {
   name: 'send_reaction',
   description:
-    "React to the user's most recent message with an emoji. Standard iMessage tapbacks are 'love' (❤️), 'like' (👍), 'dislike' (👎), 'laugh' (😂), 'emphasize' (‼️), and 'question' (❓). You can also react with any emoji by setting type to 'custom' and providing the emoji in custom_emoji. Do NOT use this as a substitute for a text reply — always pair it with a text response when the user expects a conversational answer. Avoid overusing reactions in group chats as it can feel spammy.",
+    "React to the user's most recent message with an emoji. Standard iMessage tapbacks are 'love' (❤️), 'like' (👍), 'dislike' (👎), 'laugh' (😂), 'emphasize' (‼️), and 'question' (❓). You can also react with any emoji by setting type to 'custom' and providing the emoji in custom_emoji. Do NOT use this as a substitute for a text reply — always pair it with a text response when the user expects a conversational answer. Avoid overusing reactions in group chats as it can feel spammy. NEVER use 'question' (❓) when the user is asking you to do something or asking a genuine question — it comes across as dismissive and rude. The 'question' reaction is only appropriate for messages that are genuinely garbled, nonsensical, or completely out of context.",
   namespace: 'messaging.react',
   sideEffect: 'commit',
   idempotent: true,

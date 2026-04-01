@@ -1,5 +1,6 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
+import { internalJsonHeaders } from '../_shared/internal-auth.ts';
 
 const admin = getAdminClient();
 
@@ -259,14 +260,10 @@ async function handleCallback(url: URL): Promise<Response> {
   const userInfo = await fetchGranolaUserInfo(tokens.accessToken);
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
   const callbackResp = await fetch(`${supabaseUrl}/functions/v1/manage-google-accounts/add-granola-callback`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${serviceRoleKey}`,
-    },
+    headers: internalJsonHeaders(),
     body: JSON.stringify({
       original_user_id: oauthState.user_id,
       access_token: tokens.accessToken,

@@ -1,6 +1,7 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { getDueReminders, markReminderFired, emitOnboardingEvent, getUserProfile, addMessage } from '../_shared/state.ts';
-import { sendMessage } from '../_shared/linq.ts';
+import { sendMessage, createChat } from '../_shared/linq.ts';
+import { resolveChatId } from '../_shared/email-webhook-helpers.ts';
 import { computeNextCronFire } from '../_shared/tools/manage-reminder.ts';
 import { requireAnyEnv, getOptionalEnv } from '../_shared/env.ts';
 
@@ -169,9 +170,17 @@ Deno.serve(async (req) => {
           continue;
         }
 
-        const chatId = reminder.chatId ?? `DM#${botNumber}#${reminder.handle}`;
+        const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        let chatId = (reminder.chatId && UUID_RE.test(reminder.chatId))
+          ? reminder.chatId
+          : await resolveChatId(reminder.handle);
 
-        await sendMessage(chatId, message);
+        if (chatId) {
+          await sendMessage(chatId, message);
+        } else {
+          const chatResult = await createChat(botNumber, [reminder.handle], message);
+          chatId = chatResult.chat.id;
+        }
         delivered++;
 
         console.log(
